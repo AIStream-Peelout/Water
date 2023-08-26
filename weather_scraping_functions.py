@@ -1,22 +1,13 @@
 from datetime import datetime, timedelta
-import pandas as pd
 import requests
+import pandas as pd
 
 
-def get_asos_data_from_url(station_id, start_time, end_time, station={}, stations_explored={}):
-    """_summary_
-    :param station_id: _description_
-    :type station_id: _type_
-    :param start_time: _description_
-    :type start_time: _type_
-    :param end_time: End date should always be plus one of the date scraped by the USGS function.
-    :type end_time: _type_
-    :param station: _description_, defaults to {}
-    :type station: dict, optional
-    :param stations_explored: _description_, defaults to {}
-    :type stations_explored: dict, optional
+def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
     """
-    base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=p01m&data=dwpf&data=relh&data=feel&data=drct&data=sped&data=mslp&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
+    end_time: End date should always be plus one of the date scraped by the USGS function.
+    """
+    # TODO change URL to get non ASOS gages
     if "saved_complete" not in stations_explored:
         stations_explored["saved_complete"] = {}
     response = requests.get(base_url.format(station_id, start_time.year, start_time.month, start_time.day, end_time.year, end_time.month, end_time.day))
@@ -32,6 +23,7 @@ def get_asos_data_from_url(station_id, start_time, end_time, station={}, station
     # upload_file("predict_cfs",  "asos_new/" + name, name, client)
     # station_meta_dict[station["station_id"]] = station
     # stations_list.append(station)
+
 
 def process_asos_csv(path: str):
     df = pd.read_csv(path)
