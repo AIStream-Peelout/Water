@@ -8,7 +8,7 @@ import requests
 def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     """
     Function that scrapes data from gages from a specified start_time THROUGH
-    a specified end_time. Returns hourly df of river flow data. For instance,
+    a specified end_time. Returns hourly df of river flow data. For instance:
 
     ..
     from datetime import datetime
