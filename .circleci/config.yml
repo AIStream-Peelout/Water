@@ -1,0 +1,14 @@
+version: 2.1
+orbs:
+  python: circleci/python@2.0.3
+jobs: 
+  build:
+    docker:
+      - image: circleci/python:3.7.4
+    steps:
+      - checkout
+      - python/install-packages
+      - run:
+          name: Run tests
+          command: |
+            python -m unittest discover -s tests -p 'test_*.py'

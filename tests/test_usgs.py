@@ -15,4 +15,3 @@ class TestUsgsScraping(unittest.TestCase):
         site_number = "01646500"
         result = make_usgs_data(start_date, end_date, site_number)
         self.assertEqual(len(result), 24)
-
