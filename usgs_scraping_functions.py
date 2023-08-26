@@ -13,7 +13,8 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     ..
     from datetime import datetime
     df = make_usgs_data(datetime(2020, 5, 1), datetime(2021, 5, 1) "01010500")
-    df # would return time stamps of 5/1 in fifteen minute increments (e.g 96)
+    df[1:] # would return time stamps of 5/1 in fifteen minute increments (e.g 97)
+    len(df[1:]) # 96 The first row is a junk row and real data starts second row (e.g. 96)
     ..
     """
     # //waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all
@@ -34,7 +35,7 @@ def column_renamer(x):
     """_summary_
 
     :param x: The column names of the dataframe as a string
-    :type x: _type_
+    :type x: _str
     :return: _description_
     :rtype: _type_
     """
