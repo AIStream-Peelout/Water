@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 
-def get_asos_data_from_url(station_id, start_time, end_time, station={}, stations_explored={}):
+def get_asos_data_from_url(station_id, start_time, end_time, station={}, stations_explored = {}):
     """_summary_
     :param station_id: _description_
     :type station_id: _type_
