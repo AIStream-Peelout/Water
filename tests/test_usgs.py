@@ -11,10 +11,10 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_make_usgs_data(self):
         start_date = datetime(2020, 1, 1)
-        end_date = datetime(2020, 1, 2)
+        end_date = datetime(2020, 1, 1)
         site_number = "01646500"
         result = make_usgs_data(start_date, end_date, site_number)
-        self.assertEqual(len(result), 24)
+        self.assertEqual(len(result), 96)
 
     def test_col_renamer(self):
         pass

@@ -13,7 +13,7 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     ..
     from datetime import datetime
     df = make_usgs_data(datetime(2020, 5, 1), datetime(2021, 5, 1) "01010500")
-    df[-24:] # would return time stamps of 5/1
+    df # would return time stamps of 5/1 in fifteen minute increments (e.g 96)
     ..
     """
     # //waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all
@@ -31,6 +31,13 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
 
 
 def column_renamer(x):
+    """_summary_
+
+    :param x: The column names of the dataframe as a string
+    :type x: _type_
+    :return: _description_
+    :rtype: _type_
+    """
     code_converter_1 = {"00060": "cfs", "00065": "height", "00045": "precip_usgs"}
     split_x = x.split("_")
     if len(split_x) > 1:
@@ -69,6 +76,13 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
 
 
 def df_label(usgs_text: str)->str:
+    """_summary_
+
+    :param usgs_text: _description_
+    :type usgs_text: str
+    :return: _description_
+    :rtype: str
+    """
     usgs_text = usgs_text.replace(",", "")
     if usgs_text == "Discharge":
         return "cfs"
