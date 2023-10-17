@@ -53,6 +53,13 @@ def rename_cols(df) -> pd.DataFrame:
 
 
 def process_response_text(file_name: str)->Tuple[str, Dict]:
+    """_summary_
+
+    :param file_name: _description_
+    :type file_name: str
+    :return: _description_
+    :rtype: Tuple[str, Dict]
+    """
     extractive_params = {}
     with open(file_name, "r") as f:
         lines = f.readlines()
