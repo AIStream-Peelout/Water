@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import json
 
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
@@ -51,3 +52,30 @@ def format_dt(date_time_str: str) -> datetime:
         proper_datetime = proper_datetime + timedelta(hours=1)
         proper_datetime = proper_datetime.replace(minute=0)
     return proper_datetime
+
+
+def get_snotel_daily_date(station_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """Gets the SNOTEL data from the powderlines API
+
+    ..
+
+    ..
+
+    :param station_id: id of the SNOTEL site
+    :type station_id: int
+    :param start_date: The date to start the SNOTEL scraping on (inclusive)
+    :type start_date: datetime
+    :param end_date: The date to end the SNOTEL scraping on (inclusive)
+    :type end_date: datetime
+    :return: A dataframe of the SNOTEL data
+    :rtype: pd.DataFrame
+    """
+    base_url = "https://powderlines.kellysoftware.org/api/station/{}?start_date={}&end_date={}"
+    response = requests.get(base_url.format(station_id, start_date, end_date))
+    json_res = json.loads(response.text)
+    return pd.DataFrame(json_res["data"])
+
+
+def combine_snotel_with_df(combined_df, snotel):
+    snotel["Date"] = pd.to_datetime(snotel["Date"], utc=True)
+    return combined_df.merge(snotel, left_on="hour_updated", right_on="Date", how="left")
