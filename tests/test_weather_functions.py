@@ -1,6 +1,6 @@
 
 from datetime import datetime
-from weather_scraping_functions import process_asos_csv, format_dt, get_snotel_daily_data, combine_asos_snotel
+from weather_scraping_functions import process_asos_csv, format_dt, get_snotel_daily_data, combine_snotel_with_df
 import unittest
 import pandas as pd
 
