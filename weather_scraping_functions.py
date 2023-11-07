@@ -73,8 +73,6 @@ def get_snotel_daily_data(station_id: int, start_date: str, end_date: str) -> pd
     base_url = "https://powderlines.kellysoftware.org/api/station/{}?start_date={}&end_date={}"
     response = requests.get(base_url.format(station_id, start_date, end_date))
     r = response.text
-    print("text b")
-    print(r)
     json_res = json.loads(response.text)
     return pd.DataFrame(json_res["data"])
 
@@ -90,4 +88,8 @@ def combine_snotel_with_df(combined_df, snotel) -> pd.DataFrame:
     :rtype: _type_
     """
     snotel["Date"] = pd.to_datetime(snotel["Date"], utc=True)
-    return combined_df.merge(snotel, left_on="hour_updated", right_on="Date", how="left")
+    combined_df = combined_df.merge(snotel, left_on="hour_updated", right_on="Date", how="left")
+    combined_df["snow_depth"] = combined_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
+    combined_df["snow_water"] = combined_df["Snow Water Equivalent (in)"].interpolate(method='nearest').ffill().bfill()
+    combined_df["change_in_snow_depth"] = combined_df["snow_depth"].diff()
+    return combined_df
