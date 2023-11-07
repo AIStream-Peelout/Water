@@ -16,6 +16,7 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     df[1:] # would return time stamps of 5/1 in fifteen minute increments (e.g 97)
     len(df[1:]) # 96 The first row is a junk row and real data starts second row (e.g. 96)
     ..
+
     """
     # //waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all
     base_url = "http://waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all"
@@ -48,11 +49,25 @@ def column_renamer(x):
 
 
 def rename_cols(df) -> pd.DataFrame:
+    """_summary_
+
+    :param df: _description_
+    :type df: _type_
+    :return: _description_
+    :rtype: pd.DataFrame
+    """
     df.columns = df.columns.map(column_renamer)
     return df
 
 
 def process_response_text(file_name: str)->Tuple[str, Dict]:
+    """_summary_
+
+    :param file_name: _description_
+    :type file_name: str
+    :return: _description_
+    :rtype: Tuple[str, Dict]
+    """
     extractive_params = {}
     with open(file_name, "r") as f:
         lines = f.readlines()
