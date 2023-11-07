@@ -13,7 +13,7 @@ class TestUsgsScraping(unittest.TestCase):
         start_date = datetime(2023, 1, 1)
         end_date = datetime(2023, 2, 1)
         site_number = "663:CO:SNTL"  # triplet
-        result = get_snotel_daily_data(start_date, end_date, site_number)
+        result = get_snotel_daily_data("2023-01-01", "2023-02-2", site_number)
         self.assertIsInstance(result, pd.DataFrame)
         self.assertEqual(len(result), 32)
 

@@ -54,11 +54,11 @@ def format_dt(date_time_str: str) -> datetime:
     return proper_datetime
 
 
-def get_snotel_daily_data(station_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+def get_snotel_daily_data(station_id: int, start_date: str, end_date: str) -> pd.DataFrame:
     """Gets the SNOTEL data from the powderlines API
 
     ..
-    get_snotel("663:CO:SNTL", datetime(2023, 1, 1), datetime(2023, 2, 2))
+    get_snotel("663:CO:SNTL", ,, datetime(2023, 2, 2))
     ..
 
     :param station_id: id of the SNOTEL site shou
@@ -76,14 +76,14 @@ def get_snotel_daily_data(station_id: int, start_date: datetime, end_date: datet
     return pd.DataFrame(json_res["data"])
 
 
-def combine_snotel_with_df(combined_df, snotel):
+def combine_snotel_with_df(combined_df, snotel) -> pd.DataFrame:
     """Combines the SNOTEL data with the ASOS/USGS data
 
     :param combined_df: _description_
     :type combined_df: _type_
     :param snotel: _description_
     :type snotel: _type_
-    :return: _description_
+    :return: Combined data-frame
     :rtype: _type_
     """
     snotel["Date"] = pd.to_datetime(snotel["Date"], utc=True)
