@@ -1,7 +1,7 @@
 # create unittests for the functions in usgs_scraping_functions.py
 
 from datetime import datetime
-from weather_scraping_functions import process_asos_csv, format_dt, make_asos_data, get_snotel_daily_data
+from weather_scraping_functions import process_asos_csv, format_dt, get_snotel_daily_data, combine_asos_snotel
 import unittest
 import pandas as pd
 

@@ -58,10 +58,10 @@ def get_snotel_daily_date(station_id: int, start_date: datetime, end_date: datet
     """Gets the SNOTEL data from the powderlines API
 
     ..
-
+    get_snotel("663:CO:SNTL", datetime(2023, 1, 1), datetime(2023, 2, 2))
     ..
 
-    :param station_id: id of the SNOTEL site
+    :param station_id: id of the SNOTEL site shou
     :type station_id: int
     :param start_date: The date to start the SNOTEL scraping on (inclusive)
     :type start_date: datetime
@@ -77,5 +77,14 @@ def get_snotel_daily_date(station_id: int, start_date: datetime, end_date: datet
 
 
 def combine_snotel_with_df(combined_df, snotel):
+    """Combines the SNOTEL data with the ASOS/USGS data
+
+    :param combined_df: _description_
+    :type combined_df: _type_
+    :param snotel: _description_
+    :type snotel: _type_
+    :return: _description_
+    :rtype: _type_
+    """
     snotel["Date"] = pd.to_datetime(snotel["Date"], utc=True)
     return combined_df.merge(snotel, left_on="hour_updated", right_on="Date", how="left")
