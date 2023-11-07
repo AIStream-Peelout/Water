@@ -54,7 +54,7 @@ def format_dt(date_time_str: str) -> datetime:
     return proper_datetime
 
 
-def get_snotel_daily_date(station_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+def get_snotel_daily_data(station_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Gets the SNOTEL data from the powderlines API
 
     ..
