@@ -3,10 +3,6 @@ import requests
 import pandas as pd
 
 
-class WeatherStation(object):
-    pass
-
-
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
     """
     end_time: End date should always be plus one of the date scraped by the USGS function.
