@@ -5,7 +5,7 @@ import pandas as pd
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
     """
-    end_time: End date should always be plus one of the date scraped by the USGS function. 2
+    end_time: End date should always be plus one of the date scraped by the USGS function.
     """
     # TODO change URL to get non ASOS gages
     if "saved_complete" not in stations_explored:

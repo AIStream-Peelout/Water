@@ -4,6 +4,7 @@ import requests
 from typing import Tuple, Dict
 import pandas as pd
 from usgs_scraping_functions import df_label
+from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 
 
 class HydroScraper(object):
@@ -30,7 +31,7 @@ class HydroScraper(object):
         """
         # //waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all
         base_url = "http://waterservices.usgs.gov/nwis/iv/?format=rdb,1.0&sites={}&startDT={}&endDT={}&parameterCd=00060,00065,00045&siteStatus=all"
-        full_url = base_url.format(site_number, self.start_date.strftime("%Y-%m-%d"), self.end_date.strftime("%Y-%m-%d"))
+        full_url = base_url.format(site_number, self.start_time.strftime("%Y-%m-%d"), self.end_time.strftime("%Y-%m-%d"))
         print("Getting request from USGS")
         print(full_url)
         r = requests.get(full_url)
