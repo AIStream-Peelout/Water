@@ -22,7 +22,7 @@ class HydroScraper(object):
         # self.asos_df = process_asos_csv(asos_path)
         print("Scraping completed")
 
-    def make_usgs_data(self, site_number: str):
+    def make_usgs_data(self, site_number: str) -> pd.DataFrame:
         """
         Function that scrapes data from gages from a specified start_time THROUGH
         a specified end_time. Returns hourly df of river flow data. For instance:
@@ -45,8 +45,7 @@ class HydroScraper(object):
             f.write(r.text)
         print("Request finished")
         response_data = self.process_response_text(site_number + ".txt")
-        self.create_csv(response_data[0], response_data[1], site_number)
-        pd.read_csv(site_number + "_flow_data.csv")
+        return self.create_csv(response_data[0], response_data[1], site_number)
     
     @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
@@ -57,6 +56,7 @@ class HydroScraper(object):
         for key, value in params_names.items():
             df[value] = df[key]
         df.to_csv(site_number + "_flow_data.csv")
+        return df
 
 
     @staticmethod
