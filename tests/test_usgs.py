@@ -7,7 +7,7 @@ import os
 
 
 class TestUsgsScraping(unittest.TestCase):
-    def __setUp__(self):
+    def setUp(self):
         start_date = datetime(2020, 1, 1)
         end_date = datetime(2020, 1, 1)
         self.scraper = HydroScraper(start_date, end_date, os.path.join(os.getcwd(), "test_data", "test_meta.json"))
