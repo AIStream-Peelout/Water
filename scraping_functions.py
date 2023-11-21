@@ -39,7 +39,7 @@ class HydroScraper(object):
         response_data = self.process_response_text(site_number + ".txt")
         self.create_csv(response_data[0], response_data[1], site_number)
         pd.read_csv(site_number + "_flow_data.csv")
-    
+  
     @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
         """
@@ -49,7 +49,6 @@ class HydroScraper(object):
         for key, value in params_names.items():
             df[value] = df[key]
         df.to_csv(site_number + "_flow_data.csv")
-
 
     @staticmethod
     def process_response_text(file_name: str)->Tuple[str, Dict]:
