@@ -12,6 +12,8 @@ class HydroScraper(object):
         with open(meta_data_path, "r") as f:
             self.meta_data = json.load(f)
         self.meta_data["site_number"] = str(self.meta_data["id"])
+        if len(self.meta_data["site_number"]) == 7:
+            self.meta_data["site_number"] = "0" + self.meta_data["site_number"]
         self.start_time = start_time
         self.end_time = end_time
         self.usgs_df = self.make_usgs_data(self.meta_data["site_number"])

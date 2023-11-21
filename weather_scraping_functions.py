@@ -26,7 +26,7 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
 
 
 def process_asos_csv(path: str):
-    df = pd.read_csv(path)
+    df = pd.read_csv(path) # , parse_dates=['valid']
     print(df)
     missing_precip = df['p01m'][df['p01m']=='M'].count()
     missing_temp = df['tmpf'][df['tmpf']=='M'].count()
