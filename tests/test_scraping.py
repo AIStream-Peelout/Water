@@ -5,4 +5,4 @@ import os
 
 class TestUsgClasssScraping(unittest.TestCase):
     def __setUp__(self):
-        self.scaper = EHydroScraper(datetime(2020, 5, 1), datetime(2021, 5, 1), os.path.join("meta_data.json")
+        self.scaper = EHydroScraper(datetime(2020, 5, 1), datetime(2021, 5, 1), os.path.join("meta_data.json") 

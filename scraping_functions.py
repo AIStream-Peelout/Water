@@ -6,7 +6,7 @@ import pandas as pd
 from usgs_scraping_functions import df_label
 
 
-class EHydroScraper(object):
+class HydroScraper(object):
     def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
         with open(meta_data_path, "r") as f:
             self.meta_data = json.load(f)
@@ -39,22 +39,21 @@ class EHydroScraper(object):
         response_data = self.process_response_text(site_number + ".txt")
         self.create_csv(response_data[0], response_data[1], site_number)
         pd.read_csv(site_number + "_flow_data.csv")
-
+    
+    @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
         """
-        Function that creates the final version of the CSV file
-        Assigns
+        Function that creates the final version of the CSV file. Called by `make_usgs_data`
         """
-        print(params_names)
         df = pd.read_csv(file_path, sep="\t")
         for key, value in params_names.items():
             df[value] = df[key]
         df.to_csv(site_number + "_flow_data.csv")
 
 
-
+    @staticmethod
     def process_response_text(file_name: str)->Tuple[str, Dict]:
-        """_summary_
+        """Loops through the response text and writes it to TS file. Called by `make_usgs_data`
 
         :param file_name: _description_
         :type file_name: str
