@@ -10,6 +10,7 @@ class HydroScraper(object):
     def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
         with open(meta_data_path, "r") as f:
             self.meta_data = json.load(f)
+        self.meta_data["site_number"] = str(self.meta_data["id"])
         self.start_time = start_time
         self.end_time = end_time
         self.usgs_df = self.make_usgs_data(self.meta_data["site_number"])
