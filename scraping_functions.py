@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import requests
 from typing import Tuple, Dict
@@ -15,6 +15,9 @@ class HydroScraper(object):
         self.start_time = start_time
         self.end_time = end_time
         self.usgs_df = self.make_usgs_data(self.meta_data["site_number"])
+        asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], self.meta_data["base_url"], self.start_time, self.end_time + timedelta(day=1) , self.meta_data, self.meta_data)
+        # self.asos_df = process_asos_csv(asos_path)
+        print("Scraping completed")
 
     def make_usgs_data(self, site_number: str):
         """

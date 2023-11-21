@@ -18,7 +18,8 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
     station["missing_temp"] = missing_temp
     stations_explored["saved_complete"][station_id] = station
     df.to_csv(str(station_id)+".csv")
-x    # name = str(station["station_id"])+".csv"
+    return str(station_id)+".csv"
+    # name = str(station["station_id"])+".csv"
     # upload_file("predict_cfs",  "asos_new/" + name, name, client)
     # station_meta_dict[station["station_id"]] = station
     # stations_list.append(station)
