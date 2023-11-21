@@ -15,9 +15,3 @@ class TestUsgsScraping(unittest.TestCase):
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
         self.asserIsInstance(self.scraper.usgs_df, pd.DataFrame)
-
-    def test_col_renamer(self):
-        pass
-
-    def test_df_label(self):
-        pass
