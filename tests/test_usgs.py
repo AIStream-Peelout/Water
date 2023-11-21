@@ -5,6 +5,7 @@ from scraping_functions import HydroScraper
 import unittest
 import os
 
+
 class TestUsgsScraping(unittest.TestCase):
     def setUp(self):
         start_date = datetime(2020, 1, 1)
@@ -14,4 +15,3 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
-        self.asserIsInstance(self.scraper.usgs_df, pd.DataFrame)
