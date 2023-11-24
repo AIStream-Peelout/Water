@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import requests
 import pandas as pd
 import pytz
+import json
 
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
@@ -52,3 +53,10 @@ def format_dt(date_time_str: str) -> datetime:
         proper_datetime = proper_datetime + timedelta(hours=1)
         proper_datetime = proper_datetime.replace(minute=0)
     return proper_datetime
+
+
+def get_snotel_data(start_time, end_time, station_id):
+    base_url = "https://powderlines.kellysoftware.org/api/station/{}?start_date={}&end_date={}"
+    response = requests.get(base_url.format(station_id, start_time, end_time))
+    json_res = json.loads(response.text)
+    return pd.DataFrame(json_res["data"])

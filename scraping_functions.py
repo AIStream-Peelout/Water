@@ -56,6 +56,7 @@ class HydroScraper(object):
         self.joined_df = joined_df
         self.nan_flow = nan_flow
         self.nan_precip = nan_precip
+        self.joined_df = joined_df
 
     @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
