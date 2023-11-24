@@ -15,3 +15,7 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
+
+    def test_join_usgs(self):
+        self.scraper.combine_data()
+        self.assertEqual(len(self.scraper.joined_df), 24)
