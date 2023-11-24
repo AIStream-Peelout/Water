@@ -4,7 +4,7 @@ import requests
 from typing import Tuple, Dict
 import pandas as pd
 from usgs_scraping_functions import df_label
-from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
+from weather_scraping_functions import get_asos_data_from_url, process_asos_csv, pytz
 
 
 class HydroScraper(object):
@@ -19,7 +19,7 @@ class HydroScraper(object):
         self.usgs_df = self.make_usgs_data(self.meta_data["site_number"])
         base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=p01m&data=mslp&data=drct&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=1), self.meta_data, self.meta_data)
-        # self.asos_df = process_asos_csv(asos_path) # TODO fix this
+        self.asos_df = process_asos_csv(asos_path)  # TODO fix this
         print("Scraping completed.")
 
     def make_usgs_data(self, site_number: str) -> pd.DataFrame:
@@ -46,7 +46,17 @@ class HydroScraper(object):
         print("Request finished")
         response_data = self.process_response_text(site_number + ".txt")
         return self.create_csv(response_data[0], response_data[1], site_number)
-    
+
+    def combine_data(self) -> None:
+        tz = pytz.timezone("UTC")
+        self.asos_df['hour_updated'] = self.asos_df['hour_updated'].map(lambda x: x.tz_localize("UTC"))
+        joined_df = self.asos_df.merge(self.usgs_df, left_on='hour_updated', right_on='datetime', how='inner')
+        nan_precip = sum(pd.isnull(joined_df['p01m']))
+        nan_flow = sum(pd.isnull(joined_df['cfs']))
+        self.joined_df = joined_df
+        self.nan_flow = nan_flow
+        self.nan_precip = nan_precip
+
     @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
         """
@@ -89,3 +99,7 @@ class HydroScraper(object):
             with open(file_name.split(".")[0] + "data.tsv", "w") as t:
                 t.write("".join(lines[i:]))
             return file_name.split(".")[0] + "data.tsv", extractive_params
+
+
+class BiqQueryConnector(object):
+    pass

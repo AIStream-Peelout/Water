@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import pytz
 
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
