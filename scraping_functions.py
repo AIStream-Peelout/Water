@@ -77,6 +77,7 @@ class HydroScraper(object):
         joined_df = self.asos_df.merge(self.final_usgs, left_on='hour_updated', right_on='datetime', how='inner')
         nan_precip = sum(pd.isnull(joined_df['p01m']))
         nan_flow = sum(pd.isnull(joined_df['cfs']))
+        print("shit")
         self.joined_df = joined_df
         self.nan_flow = nan_flow
         self.nan_precip = nan_precip

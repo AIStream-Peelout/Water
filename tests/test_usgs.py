@@ -25,5 +25,6 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_combine_data(self):
         self.scraper.combine_data()
+        print(self.scraper.joined_df)
         self.assertEqual(len(self.scraper.joined_df), 24)
         self.assertEqual(self.scraper.nan_flow, 0)
