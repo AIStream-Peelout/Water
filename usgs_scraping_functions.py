@@ -85,7 +85,7 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
             if len(the_split_line)>2:
                 if the_split_line[0] == "TS":
                     params = True
-            i+=1
+            i += 1
         with open(file_name.split(".")[0] + "data.tsv", "w") as t:
             t.write("".join(lines[i:]))
         return file_name.split(".")[0] + "data.tsv", extractive_params
