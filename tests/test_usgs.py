@@ -18,7 +18,7 @@ class TestUsgsScraping(unittest.TestCase):
         self.assertIn("p01m", self.scraper.asos_df.columns)
 
     def test_make_usgs_data(self):
-        self.assertEqual(len(self.scraper.usgs_df), 24)
+        self.assertEqual(len(self.scraper.usgs_df), 97)
         self.assertGreater(len(self.scraper.final_usgs), 17)
 
     def test_combine_data(self):

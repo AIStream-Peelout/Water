@@ -74,7 +74,7 @@ class HydroScraper(object):
     def combine_data(self) -> None:
         tz = pytz.timezone("UTC")
         self.asos_df['hour_updated'] = self.asos_df['hour_updated'].map(lambda x: x.tz_localize("UTC"))
-        joined_df = self.asos_df.merge(self.usgs_df, left_on='hour_updated', right_on='datetime', how='inner')
+        joined_df = self.asos_df.merge(self.final_usgs, left_on='hour_updated', right_on='datetime', how='inner')
         nan_precip = sum(pd.isnull(joined_df['p01m']))
         nan_flow = sum(pd.isnull(joined_df['cfs']))
         self.joined_df = joined_df
