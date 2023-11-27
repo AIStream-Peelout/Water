@@ -15,6 +15,7 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_asos_data(self):
         self.assertEqual(len(self.scraper.asos_df), 24)
+        self.assertIn("p01m", self.scraper.asos_df.columns)
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 24)
