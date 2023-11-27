@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Tuple, Dict
 import requests
+from scrape_text import column_renamer
 
 
 def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):

@@ -19,8 +19,8 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
     station["missing_precip"] = missing_precip
     station["missing_temp"] = missing_temp
     stations_explored["saved_complete"][station_id] = station
-    df.to_csv(str(station_id)+".csv")
-    return str(station_id)+".csv"
+    df.to_csv(str(station_id) + ".csv")
+    return str(station_id) + ".csv"
     # name = str(station["station_id"])+".csv"
     # upload_file("predict_cfs",  "asos_new/" + name, name, client)
     # station_meta_dict[station["station_id"]] = station
@@ -28,8 +28,7 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
 
 
 def process_asos_csv(path: str):
-    df = pd.read_csv(path) # , parse_dates=['valid']
-    print(df)
+    df = pd.read_csv(path)  # , parse_dates=['valid']
     missing_precip = df['p01m'][df['p01m']=='M'].count()
     missing_temp = df['tmpf'][df['tmpf']=='M'].count()
     df['hour_updated'] = df['valid'].map(format_dt)
@@ -60,3 +59,8 @@ def get_snotel_data(start_time, end_time, station_id):
     response = requests.get(base_url.format(station_id, start_time, end_time))
     json_res = json.loads(response.text)
     return pd.DataFrame(json_res["data"])
+
+
+def rename_cols(df) -> pd.DataFrame:
+  df.columns = df.columns.map(column_renamer)
+  return df
