@@ -14,11 +14,11 @@ class TestUsgsScraping(unittest.TestCase):
         self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
 
     def test_asos_data(self):
-        self.assertEqual(len(self.scraper.asos_df), 24)
+        self.assertEqual(len(self.scraper.asos_df), 25)
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
 
     def test_combine_data(self):
         self.scraper.combine_data()
-        self.assertEqual(len(self.scraper.joined_df), 24)
+        self.assertEqual(len(self.scraper.joined_df), 25)
