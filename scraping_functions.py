@@ -20,7 +20,7 @@ class HydroScraper(object):
         self.usgs_df = rename_cols(self.make_usgs_data(self.meta_data["site_number"]))
         self.final_usgs = self.process_intermediate_csv(self.usgs_df)[0]
         base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=p01m&data=mslp&data=drct&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
-        asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=1), self.meta_data, self.meta_data)
+        asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
 
         print("Scraping completed")

@@ -26,7 +26,6 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     r = requests.get(full_url)
     with open(site_number + ".txt", "w") as f:
         f.write(r.text)
-    print("Request finished")
     response_data = process_response_text(site_number + ".txt")
     create_csv(response_data[0], response_data[1], site_number)
     return pd.read_csv(site_number + "_flow_data.csv")
