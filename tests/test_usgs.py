@@ -9,7 +9,7 @@ import os
 class TestUsgsScraping(unittest.TestCase):
     def setUp(self):
         start_date = datetime(2020, 1, 1)
-        end_date = datetime(2020, 1, 2)
+        end_date = datetime(2020, 1, 1)
         self.test_data_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "test_data")
         self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
 
@@ -19,6 +19,7 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 24)
+        self.assertGreater(len(self.scraper.final_usgs), 17)
 
     def test_combine_data(self):
         self.scraper.combine_data()
