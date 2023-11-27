@@ -1,23 +1,29 @@
 # create unittests for the functions in usgs_scraping_functions.py
 
 from datetime import datetime
-from usgs_scraping_functions import make_usgs_data, process_response_text, df_label, create_csv, column_renamer, rename_cols, create_csv
+from scraping_functions import HydroScraper
 import unittest
+import os
 
 
 class TestUsgsScraping(unittest.TestCase):
-    def __setUp__(self):
-        pass
-
-    def test_make_usgs_data(self):
+    def setUp(self):
         start_date = datetime(2020, 1, 1)
         end_date = datetime(2020, 1, 1)
-        site_number = "01646500"
-        result = make_usgs_data(start_date, end_date, site_number)
-        self.assertEqual(len(result), 97)
+        self.test_data_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "test_data")
+        self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
 
-    def test_col_renamer(self):
-        pass
+    def test_asos_data(self):
+        self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues
+        self.assertIn("p01m", self.scraper.asos_df.columns)
 
-    def test_df_label(self):
-        pass
+    def test_make_usgs_data(self):
+        self.assertEqual(len(self.scraper.usgs_df), 97)
+        self.assertGreater(len(self.scraper.final_usgs), 17)
+        print(self.scraper.final_usgs)
+        self.assertEqual(len(self.scraper.final_usgs), 24)
+
+    def test_combine_data(self):
+        self.scraper.combine_data()
+        self.assertEqual(len(self.scraper.joined_df), 24)
+        self.assertEqual(self.scraper.nan_precip, 0)

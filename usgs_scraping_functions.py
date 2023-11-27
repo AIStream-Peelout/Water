@@ -26,7 +26,6 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     r = requests.get(full_url)
     with open(site_number + ".txt", "w") as f:
         f.write(r.text)
-    print("Request finished")
     response_data = process_response_text(site_number + ".txt")
     create_csv(response_data[0], response_data[1], site_number)
     return pd.read_csv(site_number + "_flow_data.csv")
@@ -85,7 +84,7 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
             if len(the_split_line)>2:
                 if the_split_line[0] == "TS":
                     params = True
-            i+=1
+            i += 1
         with open(file_name.split(".")[0] + "data.tsv", "w") as t:
             t.write("".join(lines[i:]))
         return file_name.split(".")[0] + "data.tsv", extractive_params
@@ -94,7 +93,7 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
 def df_label(usgs_text: str)->str:
     """_summary_
 
-    :param usgs_text: _description_
+    :param usgs_text: _description
     :type usgs_text: str
     :return: _description_
     :rtype: str
