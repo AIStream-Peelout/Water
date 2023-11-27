@@ -14,14 +14,13 @@ class TestUsgsScraping(unittest.TestCase):
         self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
 
     def test_asos_data(self):
-        self.assertEqual(len(self.scraper.asos_df), 24)
+        self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues
         self.assertIn("p01m", self.scraper.asos_df.columns)
 
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
         self.assertGreater(len(self.scraper.final_usgs), 17)
         print(self.scraper.final_usgs)
-        print('afer')
         self.assertEqual(len(self.scraper.final_usgs), 24)
 
     def test_combine_data(self):

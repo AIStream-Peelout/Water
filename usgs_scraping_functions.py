@@ -93,7 +93,7 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
 def df_label(usgs_text: str)->str:
     """_summary_
 
-    :param usgs_text: _description_
+    :param usgs_text: _description
     :type usgs_text: str
     :return: _description_
     :rtype: str
