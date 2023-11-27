@@ -20,8 +20,9 @@ class TestUsgsScraping(unittest.TestCase):
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
         self.assertGreater(len(self.scraper.final_usgs), 17)
+        print(self.scraper.final_usgs)
+        print('afer')
         self.assertEqual(len(self.scraper.final_usgs), 24)
-        print("equal")
 
     def test_combine_data(self):
         self.scraper.combine_data()
