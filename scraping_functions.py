@@ -44,7 +44,7 @@ class HydroScraper(object):
         min_flow = df["cfs"].min()
         # doesn't do anything with count of nan values?
         count_nan = len(df["cfs"]) - df["cfs"].count()
-        return df[df.datetime.dt.minute==0], max_flow, min_flow, count_nan
+        return df[df.datetime.dt.minute==0].reset_index(), max_flow, min_flow, count_nan
 
     def make_usgs_data(self, site_number: str) -> pd.DataFrame:
         """
