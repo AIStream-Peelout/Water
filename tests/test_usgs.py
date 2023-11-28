@@ -31,5 +31,5 @@ class TestUsgsScraping(unittest.TestCase):
         self.assertEqual(self.scraper.nan_precip, 0)
 
     def test_get_snotel_data(self):
-        snotel_df = get_snotel_data(self.scraper.start_date, self.scraper.end_date, "427:MT:SNTL")
+        snotel_df = get_snotel_data(self.scraper.start_time, self.scraper.end_time, "427:MT:SNTL")
         self.assertIsInstance(snotel_df, pd.DataFrame)
