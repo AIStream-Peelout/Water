@@ -55,7 +55,7 @@ def format_dt(date_time_str: str) -> datetime:
     return proper_datetime
 
 
-def get_snotel_data(start_time, end_time, station_id):
+def get_snotel_data(start_time, end_time, station_id) -> pd.DataFrame:
     """A function to get the SNOTEL data from the Powderlines API.
 
     :param start_time: The start_time should be a datetime object.
@@ -70,4 +70,6 @@ def get_snotel_data(start_time, end_time, station_id):
     base_url = "https://powderlines.kellysoftware.org/api/station/{}?start_date={}&end_date={}"
     response = requests.get(base_url.format(station_id, start_time, end_time))
     json_res = json.loads(response.text)
+    print("snotel rese below")
+    print(json_res)
     return pd.DataFrame(json_res["data"])
