@@ -6,7 +6,7 @@ import pandas as pd
 from usgs_scraping_functions import df_label, rename_cols
 from scrape_text import timezone_map
 from weather_scraping_functions import *
-
+import pytz
 
 class HydroScraper(object):
     def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
@@ -127,6 +127,7 @@ class HydroScraper(object):
 
     def combine_snotel_with_df(self):
         self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
+        print(self.snotel_df.columns)
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
 
