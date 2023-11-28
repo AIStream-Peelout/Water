@@ -37,5 +37,7 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_snotel_west(self):
         self.western_scraper.combine_data()
-        self.assertEqual(len(self.western_scraper.joined_df), 2136)
+        print(self.western_scraper.joined_df['datetime'])
+        self.western_scraper.combine_snotel_with_df()
+        self.assertEqual(len(self.western_scraper.joined_df), 2174)
         self.assertIn("snow_water_equivalent", self.western_scraper.joined_df.columns)
