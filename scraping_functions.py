@@ -126,6 +126,8 @@ class HydroScraper(object):
             return file_name.split(".")[0] + "data.tsv", extractive_params
 
     def combine_snotel_with_df(self):
+        """ Method to combine the SNOTEL data with the joined ASOS and USGS data
+        """
         self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
         print(self.snotel_df.columns)
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
