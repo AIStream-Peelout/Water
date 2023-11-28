@@ -131,6 +131,7 @@ class HydroScraper(object):
         self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
+        self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
 
 
 class BiqQueryConnector(object):

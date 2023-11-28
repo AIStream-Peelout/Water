@@ -42,4 +42,4 @@ class TestUsgsScraping(unittest.TestCase):
         # self.assertEqual(len(self.western_scraper.asos_df), 2184)
         self.western_scraper.combine_snotel_with_df()
         # self.assertEqual(len(self.western_scraper.joined_df), 2174)
-        self.assertIn("snow_water_equivalent", self.western_scraper.joined_df.columns)
+        self.assertIn("filled_snow", self.western_scraper.final_df.columns)
