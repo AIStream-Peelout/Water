@@ -2,8 +2,10 @@
 
 from datetime import datetime
 from scraping_functions import HydroScraper
+from weather_scraping_functions import get_snotel_data
 import unittest
 import os
+import pandas as pd
 
 
 class TestUsgsScraping(unittest.TestCase):
@@ -27,3 +29,7 @@ class TestUsgsScraping(unittest.TestCase):
         self.scraper.combine_data()
         self.assertEqual(len(self.scraper.joined_df), 24)
         self.assertEqual(self.scraper.nan_precip, 0)
+
+    def test_get_snotel_data(self):
+        snotel_df = get_snotel_data(self.scraper.start_date, self.scraper.end_date, "427:MT:SNTL")
+        self.assertIsInstance(snotel_df, pd.DataFrame)
