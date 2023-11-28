@@ -68,6 +68,7 @@ def get_snotel_data(start_time, end_time, station_id) -> pd.DataFrame:
     :rtype: pd.DataFrame
     """
     base_url = "https://powderlines.kellysoftware.org/api/station/{}?start_date={}&end_date={}"
-    response = requests.get(base_url.format(station_id, start_time.strftime("%m/%d/%Y"), end_time.strftime("%m/%d/%Y")))
+    print(base_url.format(station_id, start_time.strftime("%m-%d-%Y"), end_time.strftime("%m-%d-%Y")))
+    response = requests.get(base_url.format(station_id, start_time.strftime("%m-%d-%Y"), end_time.strftime("%m-%d-%Y")))
     json_res = json.loads(response.text)
     return pd.DataFrame(json_res["data"])
