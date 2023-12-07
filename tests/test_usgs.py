@@ -46,4 +46,4 @@ class TestUsgsScraping(unittest.TestCase):
 
     def test_x_sentinel(self):
         sentinel_csv = os.path.join(self.test_data_dir, "example_tile_west.csv")
-        self.western_scraper.combine_sentine(sentinel_csv)
+        self.western_scraper.combine_sentinel(sentinel_csv)
