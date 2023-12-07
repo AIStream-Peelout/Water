@@ -5,8 +5,10 @@ from typing import Tuple, Dict
 import pandas as pd
 from usgs_scraping_functions import df_label, rename_cols
 from scrape_text import timezone_map
-from weather_scraping_functions import *
+from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 import pytz
+from weather_scraping_functions import get_snotel_data
+
 
 class HydroScraper(object):
     def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
@@ -132,6 +134,12 @@ class HydroScraper(object):
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
         self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
+
+    def combine_sentinel(self, sentinel_df):
+        """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
+        """
+        self.sentinel_df = sentinel_df[["SENSING_TIME", "BASE_URL"]]
+        self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
 
 class BiqQueryConnector(object):
