@@ -5,8 +5,8 @@ from typing import Tuple, Dict
 import pandas as pd
 from usgs_scraping_functions import df_label, rename_cols
 from scrape_text import timezone_map
-from weather_scraping_functions import get_asos_data_from_url, process_asos_csv, pytz
-
+from weather_scraping_functions import *
+import pytz
 
 class HydroScraper(object):
     def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
@@ -120,10 +120,18 @@ class HydroScraper(object):
                 if len(the_split_line)>2:
                     if the_split_line[0] == "TS":
                         params = True
-                i+=1
+                i += 1
             with open(file_name.split(".")[0] + "data.tsv", "w") as t:
                 t.write("".join(lines[i:]))
             return file_name.split(".")[0] + "data.tsv", extractive_params
+
+    def combine_snotel_with_df(self):
+        """ to combine the SNOTEL data with the joined ASOS and USGS data.
+        """
+        self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
+        self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
+        self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
+        self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
 
 
 class BiqQueryConnector(object):
