@@ -45,5 +45,5 @@ class TestUsgsScraping(unittest.TestCase):
         self.assertIn("filled_snow", self.western_scraper.final_df.columns)
 
     def test_x_sentinel(self):
-        sentinel_csv = os.path.join(self.test_data_dir, "example_tile_west.csv")
+        sentinel_csv = pd.read_csv(os.path.join(self.test_data_dir, "example_tile_west.csv"))
         self.western_scraper.combine_sentinel(sentinel_csv)
