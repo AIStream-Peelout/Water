@@ -15,6 +15,7 @@ class TestUsgsScraping(unittest.TestCase):
         self.test_data_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "test_data")
         self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
         self.western_scraper = HydroScraper(datetime(2021, 12, 1), datetime(2022, 3, 1), os.path.join(self.test_data_dir, "west_meta.json"))
+        unittest.TestLoader.sortTestMethodsUsing = None
 
     def test_asos_data(self):
         self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues
@@ -45,5 +46,5 @@ class TestUsgsScraping(unittest.TestCase):
         self.assertIn("filled_snow", self.western_scraper.final_df.columns)
 
     def test_x_sentinel(self):
-        sentinel_csv = os.path.join(self.test_data_dir, "example_tile_west.csv")
+        sentinel_csv = pd.read_csv(os.path.join(self.test_data_dir, "example_tile_west.csv"))
         self.western_scraper.combine_sentinel(sentinel_csv)
