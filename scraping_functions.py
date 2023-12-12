@@ -144,4 +144,5 @@ class HydroScraper(object):
 
 
 class BiqQueryConnector(object):
-    pass
+    def __init__(self) -> None:
+        pass
