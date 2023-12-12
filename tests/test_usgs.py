@@ -1,5 +1,4 @@
-# create unittests for the functions in usgs_scraping_functions.py
-
+# create unittests for the functions in usgs_scraping_functions.p
 from datetime import datetime
 from scraping_functions import HydroScraper
 from weather_scraping_functions import get_snotel_data
