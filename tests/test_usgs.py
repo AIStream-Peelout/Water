@@ -1,5 +1,4 @@
-# create unittests for the functions in usgs_scraping_functions.py
-
+# create unittests for the functions in usgs_scraping_functions.p
 from datetime import datetime
 from scraping_functions import HydroScraper
 from weather_scraping_functions import get_snotel_data
@@ -15,6 +14,7 @@ class TestUsgsScraping(unittest.TestCase):
         self.test_data_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "test_data")
         self.scraper = HydroScraper(start_date, end_date, os.path.join(self.test_data_dir, "test_meta.json"))
         self.western_scraper = HydroScraper(datetime(2021, 12, 1), datetime(2022, 3, 1), os.path.join(self.test_data_dir, "west_meta.json"))
+        unittest.TestLoader.sortTestMethodsUsing = None
 
     def test_asos_data(self):
         self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues
@@ -43,3 +43,7 @@ class TestUsgsScraping(unittest.TestCase):
         self.western_scraper.combine_snotel_with_df()
         # self.assertEqual(len(self.western_scraper.joined_df), 2174)
         self.assertIn("filled_snow", self.western_scraper.final_df.columns)
+        sentinel_csv = pd.read_csv(os.path.join(self.test_data_dir, "example_tile_west.csv"))
+        self.western_scraper.combine_sentinel(sentinel_csv)
+        self.assertIn("SENSING_TIME", self.western_scraper.final_df.columns)
+        self.assertIn("BASE_URL", self.western_scraper.final_df.columns)
