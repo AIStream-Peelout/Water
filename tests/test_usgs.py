@@ -47,3 +47,6 @@ class TestUsgsScraping(unittest.TestCase):
         self.western_scraper.combine_sentinel(sentinel_csv)
         self.assertIn("SENSING_TIME", self.western_scraper.final_df.columns)
         self.assertIn("BASE_URL", self.western_scraper.final_df.columns)
+
+    def test_connector():
+        pass
