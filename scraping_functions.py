@@ -8,7 +8,6 @@ from scrape_text import timezone_map
 from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 import pytz
 from weather_scraping_functions import get_snotel_data
-import os
 
 
 class HydroScraper(object):
@@ -145,5 +144,4 @@ class HydroScraper(object):
 
 
 class BiqQueryConnector(object):
-    def __init__(self) -> None:
-        pass
+    pass
