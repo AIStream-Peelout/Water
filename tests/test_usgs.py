@@ -17,7 +17,7 @@ class TestUsgsScraping(unittest.TestCase):
         unittest.TestLoader.sortTestMethodsUsing = None
 
     def test_asos_data(self):
-        self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues
+        self.assertEqual(len(self.scraper.asos_df), 47)  # 47 because we scraped additional day due to time zone issues.
         self.assertIn("p01m", self.scraper.asos_df.columns)
 
     def test_make_usgs_data(self):

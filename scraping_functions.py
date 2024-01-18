@@ -145,3 +145,6 @@ class HydroScraper(object):
 
 class BiqQueryConnector(object):
     pass
+
+class SCANScraper(object):
+    pass
