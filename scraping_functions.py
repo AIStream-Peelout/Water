@@ -29,11 +29,10 @@ class HydroScraper(object):
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
         self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
-
         print("Scraping completed")
 
     @staticmethod
-    def process_intermediate_csv(df:pd.DataFrame) -> (pd.DataFrame, int, int, int):
+    def process_intermediate_csv(df: pd.DataFrame) -> (pd.DataFrame, int, int, int):
         """
         Converts local time to UTC time, counts NaN values, gets max/min flows
         """
@@ -51,7 +50,7 @@ class HydroScraper(object):
         min_flow = df["cfs"].min()
         # doesn't do anything with count of nan values?
         count_nan = len(df["cfs"]) - df["cfs"].count()
-        return df[df.datetime.dt.minute==0].reset_index(), max_flow, min_flow, count_nan
+        return df[df.datetime.dt.minute == 0].reset_index(), max_flow, min_flow, count_nan
 
     def make_usgs_data(self, site_number: str) -> pd.DataFrame:
         """

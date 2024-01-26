@@ -51,7 +51,7 @@ def process_asos_csv(path: str):
     # df['p01m']=(df['p01m'].fillna(method='ffill') + df['p01m'].fillna(method='bfill'))/2
     # df['p01m'] = df['p01m'].fillna(0)
     # df['tmpf']=(df['tmpf'].fillna(method='ffill') + df['tmpf'].fillna(method='bfill'))/2
-    df = df.groupby(by=['hour_updated'], as_index=False).agg({'p01m': 'sum', 'valid': 'first', 'tmpf': 'mean', 'dwpf':'mean', 'ice_accretion_1hr':'first', 'mslp':'first', 'drct':'first', 'sped': 'first', 'alti': 'first', 'relh': 'first', 'sknt': 'first', 'feel': 'first', 'vsby': 'first', 'gust': 'first', 'skyc1': 'first', 'peak_wind_gust': 'first', 'snowdepth': 'first', 'station_id': 'first'})
+    df = df.groupby(by=['hour_updated'], as_index=False).agg({'p01m': 'sum', 'valid': 'first', 'tmpf': 'mean', 'dwpf':'mean', 'ice_accretion_1hr':'first', 'mslp':'first', 'drct':'first', 'sped': 'first', 'alti': 'first', 'relh': 'first', 'sknt': 'first', 'feel': 'first', 'vsby': 'first', 'gust': 'first', 'skyc1': 'first', 'peak_wind_gust': 'first', 'snowdepth': 'first'})
     print("after")
     return df, int(missing_precip), int(missing_temp)
 
