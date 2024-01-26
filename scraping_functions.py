@@ -140,8 +140,8 @@ class HydroScraper(object):
     def combine_sentinel(self, sentinel_df):
         """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
         """
-        self.sentinel_df = sentinel_df[["sensing_time", "base_url"]]
-        self.sentinel_df["SENSING_TIME"] = pd.to_datetime(self.sentinel_df["sensing_time"], utc=True)
+        self.sentinel_df = sentinel_df[["SENSING_TIME", "BASE_URL"]]
+        self.sentinel_df["SENSING_TIME"] = pd.to_datetime(self.sentinel_df["SENSING_TIME"], utc=True)
         self.final_df = self.final_df.merge(self.sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
 
