@@ -43,7 +43,7 @@ def process_asos_csv(path: str):
     df['relh'] = pd.to_numeric(df['relh'], errors='coerce')
     df['sknt'] = pd.to_numeric(df['sknt'], errors='coerce')
     df['sped'] = pd.to_numeric(df['sped'], errors='coerce')
-    df['alti'] = pd.to_numeric(df['ati'], errors='coerce')
+    df['alti'] = pd.to_numeric(df['alti'], errors='coerce')
     print(df)
     # Replace mising values with an average of the two closest values
     # Since stations record at different intervals this could
