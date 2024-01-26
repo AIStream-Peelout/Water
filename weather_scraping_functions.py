@@ -12,6 +12,8 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
     # TODO change URL to get non ASOS gages
     if "saved_complete" not in stations_explored:
         stations_explored["saved_complete"] = {}
+    print("Getting request from ASOS")
+    print(base_url.format(station_id, start_time.year, start_time.month, start_time.day, end_time.year, end_time.month, end_time.day))
     response = requests.get(base_url.format(station_id, start_time.year, start_time.month, start_time.day, end_time.year, end_time.month, end_time.day))
     with open("temp_weather_data.csv", "w+") as f:
         f.write(response.text)

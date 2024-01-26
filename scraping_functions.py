@@ -21,7 +21,9 @@ class HydroScraper(object):
         self.end_time = end_time
         self.usgs_df = rename_cols(self.make_usgs_data(self.meta_data["site_number"]))
         self.final_usgs = self.process_intermediate_csv(self.usgs_df)[0]
-        base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=p01m&data=mslp&data=drct&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
+        # https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station=AIO&data=tmpf&data=dwpf&data=relh&data=feel&data=sknt&data=sped&data=alti&data=p01m&data=vsby&data=gust&data=skyc1&data=peak_wind_gust&data=snowdepth&year1=2024&month1=1&day1=1&year2=2024&month2=1&day2=25&tz=Etc%2FUTC&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3&report_type=4
+        # base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=p01m&data=mslp&data=drct&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
+        base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=relh&data=feel&data=sknt&data=sped&data=alti&data=mslp&data=drct&data=ice_accretion_1hr&data=p01m&data=vsby&data=gust&data=skyc1&data=peak_wind_gust&data=snowdepth&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3&report_type=4"
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
 
@@ -145,6 +147,7 @@ class HydroScraper(object):
 
 class BiqQueryConnector(object):
     pass
+
 
 class SCANScraper(object):
     pass
