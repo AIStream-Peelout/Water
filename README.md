@@ -8,5 +8,3 @@ This repo also contains notebooks used to build river flow data around the U.S. 
 09/01: Updating Repository for [FlowDB 2.0] See Confluence.
 
 12/06  Functions for scraper object in [Python code](https://github.com/AIStream-Peelout/Water/blob/master/scraping_functions.py) now available.
-
-1/26 Begining archiving of ASOS data
