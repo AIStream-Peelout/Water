@@ -8,6 +8,8 @@ from scrape_text import timezone_map
 from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 import pytz
 from weather_scraping_functions import get_snotel_data
+from google.cloud import bigquery
+
 
 
 class HydroScraper(object):
@@ -26,6 +28,7 @@ class HydroScraper(object):
         base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=relh&data=feel&data=sknt&data=sped&data=alti&data=mslp&data=drct&data=ice_accretion_1hr&data=p01m&data=vsby&data=gust&data=skyc1&data=peak_wind_gust&data=snowdepth&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3&report_type=4"
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
+        self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
 
         print("Scraping completed")
 
@@ -146,7 +149,13 @@ class HydroScraper(object):
 
 
 class BiqQueryConnector(object):
-    pass
+    def __init__(self) -> None:
+        self.client = bigquery.Client(project="hydro-earthnet-db")
+
+    def write_to_bq(self, df: pd.DataFrame, table_name: str) -> None:
+        table_id = "hydronet." + table_name
+        job = self.client.load_table_from_dataframe(df, table_id)
+        print(job.result())
 
 
 class SCANScraper(object):
