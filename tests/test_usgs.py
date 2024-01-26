@@ -38,7 +38,7 @@ class TestUsgsScraping(unittest.TestCase):
     def test_sentinel_west(self):
         self.western_scraper.combine_data()
         # TODO figure out hour discrpency while scraping..
-        self.assertEqual(len(self.western_scraper.usgs_df) / 4, 2184)  # most 1 hour short
+        self.assertEqual(len(self.western_scraper.usgs_df) / 4, 2184). most 1 hour short
         self.assertEqual(len(self.western_scraper.asos_df), 2184)
         self.western_scraper.combine_snotel_with_df()
         self.assertEqual(len(self.western_scraper.joined_df), 2174)
