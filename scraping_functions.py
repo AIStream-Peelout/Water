@@ -9,11 +9,20 @@ from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 import pytz
 from weather_scraping_functions import get_snotel_data
 from google.cloud import bigquery
-
+from redis import Redis
+import os
 
 
 class HydroScraper(object):
-    def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str) -> None:
+    def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str, asos_bq_table="weather_asos_test") -> None:
+        self.r = Redis(
+            host='redis-12962.c325.us-east-1-4.ec2.cloud.redislabs.com',
+            port=12962,
+            db=0,
+            username="default",
+            password=os.environ["REDIS_PASSWORD"],
+            decode_responses=True
+        )
         with open(meta_data_path, "r") as f:
             self.meta_data = json.load(f)
         self.meta_data["site_number"] = str(self.meta_data["id"])
@@ -30,6 +39,13 @@ class HydroScraper(object):
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
         self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
         print("Scraping completed")
+        res = False
+        if self.r.get(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time)) is None:
+            self.bq_connect = BiqQueryConnector()
+            res = self.bq_connect.write_to_bq(self.asos_df, asos_bq_table)
+        if res:
+            print("ASOS data written to BigQuery")
+            self.r.set(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time), "True")
 
     @staticmethod
     def process_intermediate_csv(df: pd.DataFrame) -> (pd.DataFrame, int, int, int):
@@ -151,10 +167,11 @@ class BiqQueryConnector(object):
     def __init__(self) -> None:
         self.client = bigquery.Client(project="hydro-earthnet-db")
 
-    def write_to_bq(self, df: pd.DataFrame, table_name: str) -> None:
+    def write_to_bq(self, df: pd.DataFrame, table_name: str) -> bool:
         table_id = "hydronet." + table_name
         job = self.client.load_table_from_dataframe(df, table_id)
         print(job.result())
+        return True
 
 
 class SCANScraper(object):
