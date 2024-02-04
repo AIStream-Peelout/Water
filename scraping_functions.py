@@ -154,6 +154,7 @@ class HydroScraper(object):
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
         self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
+<<<<<<< HEAD
     
     def combine_sentinel(self, sentinel_df, tile):
         """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
@@ -164,6 +165,18 @@ class HydroScraper(object):
         self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
     class BiqQueryConnector(object):
+=======
+
+    def combine_sentinel(self, sentinel_df):
+        """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
+        """
+        self.sentinel_df = sentinel_df[["SENSING_TIME", "BASE_URL"]]
+        self.sentinel_df["SENSING_TIME"] = pd.to_datetime(self.sentinel_df["SENSING_TIME"], utc=True)
+        self.final_df = self.final_df.merge(self.sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
+
+
+class BiqQueryConnector(object):
+>>>>>>> parent of 4b3345d (add THE FUCKING SCRAPING FUNCTION !!!!!!!!!!!!!!!!!!)
     def __init__(self) -> None:
         self.client = bigquery.Client(project="hydro-earthnet-db")
 
