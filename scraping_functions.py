@@ -39,9 +39,9 @@ class HydroScraper(object):
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
         self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
         print("Scraping completed")
+        self.bq_connect = BiqQueryConnector()
         res = False
         if self.r.get(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time)) is None:
-            self.bq_connect = BiqQueryConnector()
             res = self.bq_connect.write_to_bq(self.asos_df, asos_bq_table)
         if res:
             print("ASOS data written to BigQuery")
@@ -163,6 +163,10 @@ class HydroScraper(object):
         sentinel_df["SENSING_TIME"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
         self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
+    def write_final_df_to_bq(self, table_name: str) -> bool:
+        job = self.client.load_table_from_dataframe(self.final_df, table_name)
+        print(job.result())
+        return True
 
 
 class BiqQueryConnector(object):
