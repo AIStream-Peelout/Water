@@ -155,14 +155,13 @@ class HydroScraper(object):
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
         self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
 
-    def combine_sentinel(final_df, sentinel_df, tile):
+    def combine_sentinel(self, sentinel_df, tile):
         """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
         """
         sentinel_df = sentinel_df[sentinel_df["mgrs_tile"]==tile] 
         sentinel_df = sentinel_df[["sensing_time", "base_url"]]
         sentinel_df["SENSING_TIME"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
-        final_df = final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
-        return final_df
+        self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
     def write_final_df_to_bq(self, table_name: str) -> bool:
         return self.bq_connect.write_to_bq(self.final_df, table_name)
