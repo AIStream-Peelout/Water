@@ -38,10 +38,10 @@ class HydroScraper(object):
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
         self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
+        self.bq_connect = BiqQueryConnector()
         print("Scraping completed")
         res = False
         if self.r.get(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time)) is None:
-            self.bq_connect = BiqQueryConnector()
             res = self.bq_connect.write_to_bq(self.asos_df, asos_bq_table)
         if res:
             print("ASOS data written to BigQuery")
@@ -155,12 +155,17 @@ class HydroScraper(object):
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
         self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
 
-    def combine_sentinel(self, sentinel_df):
+    def combine_sentinel(final_df, sentinel_df, tile):
         """ to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
         """
-        self.sentinel_df = sentinel_df[["SENSING_TIME", "BASE_URL"]]
-        self.sentinel_df["SENSING_TIME"] = pd.to_datetime(self.sentinel_df["SENSING_TIME"], utc=True)
-        self.final_df = self.final_df.merge(self.sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
+        sentinel_df = sentinel_df[sentinel_df["mgrs_tile"]==tile] 
+        sentinel_df = sentinel_df[["sensing_time", "base_url"]]
+        sentinel_df["SENSING_TIME"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
+        final_df = final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
+        return final_df
+
+    def write_final_df_to_bq(self, table_name: str) -> bool:
+        return self.bq_connect.write_to_bq(self.final_df, table_name)
 
 
 class BiqQueryConnector(object):
