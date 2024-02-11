@@ -8,7 +8,7 @@ from scrape_text import timezone_map
 from weather_scraping_functions import get_asos_data_from_url, process_asos_csv
 import pytz
 from weather_scraping_functions import get_snotel_data
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 from redis import Redis
 import os
 
@@ -62,6 +62,10 @@ class HydroScraper(object):
         # This assumes timezones are consistent throughout the USGS stream (this should be true)
         df["datetime"] = df["datetime"].map(lambda x: old_timezone.localize(datetime.strptime(x, "%Y-%m-%d %H:%M")).astimezone(new_timezone))
         df["cfs"] = pd.to_numeric(df['cfs'], errors='coerce')
+        if "height" in df.columns:
+            df["height"] = pd.to_numeric(df['height'], errors='coerce')
+        if "precip_usgs" in df.columns:
+            df["precip_usgs"] = pd.to_numeric(df['precip_usgs'], errors='coerce')
         max_flow = df["cfs"].max()
         min_flow = df["cfs"].min()
         # doesn't do anything with count of nan values?
@@ -95,7 +99,8 @@ class HydroScraper(object):
 
     def combine_data(self) -> None:
         tz = pytz.timezone("UTC")
-        self.asos_df['hour_updated'] = self.asos_df['hour_updated'].map(lambda x: x.tz_localize("UTC"))
+        if self.asos_df.hour_updated.dt.tz is None:
+            self.asos_df['hour_updated'] = self.asos_df['hour_updated'].map(lambda x: x.tz_localize("UTC"))
         joined_df = self.asos_df.merge(self.final_usgs, left_on='hour_updated', right_on='datetime', how='inner')
         nan_precip = sum(pd.isnull(joined_df['p01m']))
         nan_flow = sum(pd.isnull(joined_df['cfs']))
@@ -103,6 +108,9 @@ class HydroScraper(object):
         self.nan_flow = nan_flow
         self.nan_precip = nan_precip
         self.joined_df = joined_df
+        self.joined_df.drop(columns=["site_no"], inplace=True)
+        columns_to_drop = [col for col in self.joined_df.columns if col.endswith('_cd')]
+        self.joined_df.drop(columns=columns_to_drop, inplace=True)
 
     @staticmethod
     def create_csv(file_path: str, params_names: dict, site_number: str):
@@ -160,24 +168,33 @@ class HydroScraper(object):
         """
         sentinel_df = sentinel_df[sentinel_df["mgrs_tile"]==tile] 
         sentinel_df = sentinel_df[["sensing_time", "base_url"]]
-        sentinel_df["SENSING_TIME"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
+        sentinel_df["sensing_time"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
         self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
-    def write_final_df_to_bq(self, table_name: str) -> bool:
-        job = self.client.load_table_from_dataframe(self.final_df, table_name)
-        print(job.result())
-        return True
+    def write_final_df_to_bq(self, table_name: str):
+        self.bq_connect.write_to_bq(self.final_df, table_name)
 
 
 class BiqQueryConnector(object):
     def __init__(self) -> None:
         self.client = bigquery.Client(project="hydro-earthnet-db")
+        self.gcs_client = storage.Client(project="hydro-earthnet-db")
 
     def write_to_bq(self, df: pd.DataFrame, table_name: str) -> bool:
         table_id = "hydronet." + table_name
         job = self.client.load_table_from_dataframe(df, table_id)
         print(job.result())
         return True
+
+    def upload_file_to_gcs(self, df, site_no, bucket_name="flow_hydro_2_data", file_type="joined_df"):
+        csv_file = df.to_csv()
+        bucket = self.gcs_client.get_bucket(bucket_name)
+        gcs_path = file_type
+        # Define the blob path
+        blob = bucket.blob(os.path.join(gcs_path, site_no + ".csv"))
+
+        # Upload the CSV data to the blob
+        blob.upload_from_string(csv_file, content_type='text/csv')
 
 
 class SCANScraper(object):
