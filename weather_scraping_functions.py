@@ -51,8 +51,7 @@ def process_asos_csv(path: str):
     df['snowdepth'] = pd.to_numeric(df['snowdepth'], errors='coerce')
     df['ice_accretion_1hr'] = pd.to_numeric(df['ice_accretion_1hr'], errors='coerce')
     df['drct'] = pd.to_numeric(df['drct'], errors='coerce')
-    print(df)
-    print("what")
+    df['skyc1'] = df['skyc1'].astype(str)
     # Replace mising values with an average of the two closest values
     # Since stations record at different intervals this could
     # actually cause an overestimation of precip. Instead replace with 0

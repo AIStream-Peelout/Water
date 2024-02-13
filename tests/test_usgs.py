@@ -1,7 +1,7 @@
 # create unittests for the functions in usgs_scraping_functions.py
 from datetime import datetime
 from scraping_functions import HydroScraper, BiqQueryConnector
-from weather_scraping_functions import get_snotel_data, process_asos_csv
+from weather_scraping_functions import get_snotel_data
 import unittest
 import os
 import pandas as pd
@@ -23,7 +23,6 @@ class TestUsgsScraping(unittest.TestCase):
     def test_make_usgs_data(self):
         self.assertEqual(len(self.scraper.usgs_df), 97)
         self.assertGreater(len(self.scraper.final_usgs), 17)
-        print(self.scraper.final_usgs)
         self.assertEqual(len(self.scraper.final_usgs), 24)
 
     def test_combine_data(self):
