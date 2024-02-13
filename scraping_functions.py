@@ -198,4 +198,10 @@ class BiqQueryConnector(object):
 
 
 class SCANScraper(object):
-    pass
+    """_summary_
+
+    :param object: _description_
+    :type object: _type_
+    """
+    def __init__(self) -> None:
+        pass
