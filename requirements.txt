@@ -1,5 +1,5 @@
 pandas
 requests 
-google-cloud-bigquery
+google-cloud-bigquery[pandas]
 google-cloud-storage
 redis

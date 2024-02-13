@@ -1,4 +1,4 @@
-# create unittests for the functions in usgs_scraping_functions.p
+# create unittests for the functions in usgs_scraping_functions.py
 from datetime import datetime
 from scraping_functions import HydroScraper, BiqQueryConnector
 from weather_scraping_functions import get_snotel_data, process_asos_csv
