@@ -42,8 +42,6 @@ class HydroScraper(object):
         self.bq_connect = BiqQueryConnector()
         res = False
         if self.r.get(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time)) is None:
-            print("The DF")
-            print(self.asos_df.dtypes)
             res = self.bq_connect.write_to_bq(self.asos_df, asos_bq_table)
         if res:
             print("ASOS data written to BigQuery")
@@ -145,7 +143,7 @@ class HydroScraper(object):
                 the_split_line = lines[i].split()[1:]
                 if params:
                     print(the_split_line)
-                    if len(the_split_line)<2:
+                    if len(the_split_line) < 2:
                         params = False
                     else:
                         extractive_params[the_split_line[0]+"_"+the_split_line[1]] = df_label(the_split_line[2])
