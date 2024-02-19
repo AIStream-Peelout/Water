@@ -198,10 +198,11 @@ class BiqQueryConnector(object):
 
 
 class SCANScraper(object):
-    """_summary_
-
+    """Class to scrape SCAN data from the USDA website and save files to CSVs and BigQuery.
     :param object: _description_
     :type object: _type_
     """
     def __init__(self) -> None:
-        pass
+        self.base_url = "https://www.wcc.nrcs.usda.gov/nwcc/site?sitenum={}&state={}&county={}&agency=NRCS"
+        self.scan_df = self.get_scan_data()
+        self.bq_connect = BiqQueryConnector()
