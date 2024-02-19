@@ -169,7 +169,7 @@ class HydroScraper(object):
         sentinel_df = sentinel_df[sentinel_df["mgrs_tile"]==tile] 
         sentinel_df = sentinel_df[["sensing_time", "base_url"]]
         sentinel_df["sensing_time"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
-        self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="sensing_time", how="left")
+        self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="SENSING_TIME", how="left")
 
     def write_final_df_to_bq(self, table_name: str):
         self.bq_connect.write_to_bq(self.final_df, table_name)
