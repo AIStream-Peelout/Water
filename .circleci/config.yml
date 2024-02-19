@@ -8,6 +8,10 @@ jobs:
     steps:
       - checkout
       - run:
+          name: Authenticate with GCP
+          command: |
+            echo $GCLOUD_SERVICE_KEY > file.json
+      - run:
           name: Run tests
           command: |
             pip install -r requirements.txt

@@ -1,2 +1,5 @@
 pandas
-requests
+requests 
+google-cloud-bigquery[pandas]
+google-cloud-storage
+redis
