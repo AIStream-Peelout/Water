@@ -7,7 +7,7 @@ import json
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
     """
-    end_time: End date should always be plus one of the date scraped by the USGS function..
+    end_time: End date should always be plus one of the date scraped by the USGS function.
     """
     # TODO change URL to get non ASOS gages
     if "saved_complete" not in stations_explored:
@@ -21,8 +21,8 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
     station["missing_precip"] = missing_precip
     station["missing_temp"] = missing_temp
     stations_explored["saved_complete"][station_id] = station
-    df.to_csv(str(station_id)+".csv")
-    return str(station_id)+".csv"
+    df.to_csv(str(station_id) + ".csv")
+    return str(station_id) + ".csv"
     # name = str(station["station_id"])+".csv"
     # upload_file("predict_cfs",  "asos_new/" + name, name, client)
     # station_meta_dict[station["station_id"]] = station
@@ -30,7 +30,7 @@ def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={
 
 
 def process_asos_csv(path: str):
-    df = pd.read_csv(path) # , parse_dates=['valid']
+    df = pd.read_csv(path)  # , parse_dates=['valid']
     print(df)
     missing_precip = df['p01m'][df['p01m']=='M'].count()
     missing_temp = df['tmpf'][df['tmpf']=='M'].count()

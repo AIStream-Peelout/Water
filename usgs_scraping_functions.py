@@ -90,7 +90,7 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
         return file_name.split(".")[0] + "data.tsv", extractive_params
 
 
-def df_label(usgs_text: str)->str:
+def df_label(usgs_text: str) -> str:
     """_summary_
 
     :param usgs_text: _description
@@ -107,7 +107,7 @@ def df_label(usgs_text: str)->str:
         return usgs_text
 
 
-def create_csv(file_path: str, params_names: dict, site_number: str):
+def create_csv(file_path: str, params_names: dict, site_number: str): 
     """
     Function that creates the final version of the CSV file
     Assigns
