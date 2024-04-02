@@ -36,8 +36,15 @@ class HydroScraper(object):
         # base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=p01m&data=mslp&data=drct&data=ice_accretion_1hr&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&missing=M&trace=T&direct=no&report_type=1&report_type=2"
         base_url = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf&data=relh&data=feel&data=sknt&data=sped&data=alti&data=mslp&data=drct&data=ice_accretion_1hr&data=p01m&data=vsby&data=gust&data=skyc1&data=peak_wind_gust&data=snowdepth&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no&report_type=3&report_type=4"
         asos_path = get_asos_data_from_url(self.meta_data["stations"][0]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
+
         self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
         self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
+        idx = 1
+        while self.asos_df.empty:
+            print("Initial ASOS data empty, trying again")
+            self.get_asos_data(idx, base_url)
+            idx += 1
+            
         print("Scraping completed")
         self.bq_connect = BiqQueryConnector()
         res = False
@@ -46,7 +53,7 @@ class HydroScraper(object):
         if res:
             print("ASOS data written to BigQuery")
             self.r.set(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time), "True")
-
+    
     @staticmethod
     def process_intermediate_csv(df: pd.DataFrame) -> (pd.DataFrame, int, int, int):
         """
@@ -161,7 +168,12 @@ class HydroScraper(object):
         self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
-        self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
+        self.final_df["snotel_snow_depth"] = pd.to_numeric(self.final_df["Snow Depth (in)"], errors='coerce')
+        self.final_df["swe"] = pd.to_numeric(self.final_df["Snow Water Equivalent (in)"], errors='coerce')
+        self.final_df["change_swe"] = pd.to_numeric(self.final_df["Change In Snow Water Equivalent (in)"], errors='coerce')
+        self.final_df["change_snow_depth"] = pd.to_numeric(self.final_df["Change In Snow Depth (in)"], errors='coerce')
+        self.final_df["observed_temp_snotel"] = pd.to_numeric(self.final_df["Observed Air Temperature (degrees farenheit)"], errors='coerce')
+        self.final_df.drop(columns=['Snow Water Equivalent (in)', 'Change In Snow Water Equivalent (in)', 'Snow Depth (in)', 'Change In Snow Depth (in)', 'Observed Air Temperature (degrees farenheit)'], inplace=True)
 
     def combine_sentinel(self, sentinel_df, tile) -> None:
         """Function to combine the Sentinel data with the joined ASOS, USGS, and SNOTEL data.
@@ -174,6 +186,10 @@ class HydroScraper(object):
     def write_final_df_to_bq(self, table_name: str):
         self.bq_connect.write_to_bq(self.final_df, table_name)
 
+    def get_asos_data(self, station_idx, base_url):
+        asos_path = get_asos_data_from_url(self.meta_data["stations"][station_idx]["station_id"], base_url, self.start_time, self.end_time + timedelta(days=2), self.meta_data, self.meta_data)
+        self.asos_df, self.precip, self.temp = process_asos_csv(asos_path)
+        self.asos_df["station_id"] = self.meta_data["stations"][0]["station_id"]
 
 class BiqQueryConnector(object):
     def __init__(self) -> None:
