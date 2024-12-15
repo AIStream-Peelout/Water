@@ -10,3 +10,11 @@ This repository also contains notebooks used to build river flow data around the
 12/06  Functions for scraper object in [Python code](https://github.com/AIStream-Peelout/Water/blob/master/scraping_functions.py) now available.
 
 2/18 End-to-End Scrape using Sentinel and SNOTEL working.
+
+
+
+
+
+
+This repository is dedicated in memory of Sammy. He was the sweetest pup and was taken way too soon. If you use found this code helpful 
+please consider donating to [Dumb Friends League](https://www.ddfl.org).
