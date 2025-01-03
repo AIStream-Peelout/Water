@@ -17,4 +17,4 @@ This repository also contains notebooks used to build river flow data around the
 
 
 This repository is dedicated in memory of Sammy. He was the sweetest pup and was taken way too soon. If you use found this code helpful 
-please consider donating to [Dumb Friends League](https://www.ddfl.org).
+please consider donating to th [Dumb Friends League](https://www.ddfl.org).
