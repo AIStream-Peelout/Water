@@ -12,11 +12,14 @@ from google.cloud import bigquery, storage
 from redis import Redis
 import os
 import logging
-from urllib.parse import quote
+import boto3
+from botocore import UNSIGNED
+from usgs_scraping_functions import Config
 import time
+import re
 
 class HydroScraper(object):
-    def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str, asos_bq_table="weather_asos_test", use_redis=False) -> None:
+    def __init__(self, start_time: datetime, end_time: datetime, meta_data_path: str, asos_bq_table="weather_asos_test", use_redis=False, use_bq=False) -> None:
         """
         Class to scrape USGS and ASOS data and save the data to BigQuery.
         :param start_time: The start time of the data to scrape.
@@ -27,7 +30,8 @@ class HydroScraper(object):
         :type meta_data_path: str
         :param asos_bq_table: The name of the BigQuery table to save the ASOS data to.
         :type asos_bq_table: str
-        :param use_redis: Whether to use Redis to store the data.
+        :param use_redis: Whether to use Redis to store the start and end times of the data. This effectively disables
+        the scraper from running twice in a row.
         :type use_redis: bool
         """
         self.use_redis = use_redis
@@ -43,6 +47,7 @@ class HydroScraper(object):
         with open(meta_data_path, "r") as f:
             self.meta_data = json.load(f)
         self.meta_data["site_number"] = str(self.meta_data["id"])
+        # Due to initial scrapping errors that casted the gage id as integer there some gages that do not have
         if len(self.meta_data["site_number"]) == 7:
             self.meta_data["site_number"] = "0" + self.meta_data["site_number"]
         self.start_time = start_time
@@ -63,7 +68,8 @@ class HydroScraper(object):
             self.asos_df["station_id"] = self.meta_data["stations"][i]["station_id"]
             i+=1
         print("Scraping completed")
-        self.bq_connect = BiqQueryConnector()
+        if use_bq:
+            self.bq_connect = BiqQueryConnector()
         res = False
         if self.use_redis:
             if self.r.get(self.meta_data["stations"][0]["station_id"] + "_" + str(self.start_time) + "_" + str(self.end_time)) is None:
@@ -102,10 +108,10 @@ class HydroScraper(object):
         Function that scrapes data from gages from a specified start_time THROUGH
         a specified end_time. Returns hourly df of river flow data. For instance:
 
-        ..
+        ...
         from datetime import datetime
         df = make_usgs_data(datetime(2020, 5, 1), datetime(2021, 5, 1) "01010500")
-        df[1:] # would return time stamps of 5/1 in fifteen minute increments (e.g 97)
+        df[1:] # would return time stamps of 5/1 in fifteen minute increments (e.g. 97)
         len(df[1:]) # 96 The first row is a junk row and real data starts second row (e.g. 96)
         ..
 
@@ -151,7 +157,7 @@ class HydroScraper(object):
 
     @staticmethod
     def process_response_text(file_name: str)->Tuple[str, Dict]:
-        """Loops through the response text and writes it to TS file. Called by the`make_usgs_data`
+        """Loops through the response text and writes it to the TS file. Called by the`make_usgs_data function.
 
         :param file_name: _description_
         :type file_name: str
@@ -206,9 +212,214 @@ class HydroScraper(object):
     def write_final_df_to_bq(self, table_name: str):
         self.bq_connect.write_to_bq(self.final_df, table_name)
 
-    def scrape_images(self, output_dir: str = "river_images") -> dict:
+    def scrape_images(self, output_dir: str = "river_images",
+                                    bucket_name: str = "usgs-nims-images",
+                                    prefix: str = None,
+                                    date_filter: datetime = None) -> dict:
         """
-        Downloads USGS webcam images for the time period specified in the scraper.
+        Lists and downloads all webcam images from a public S3 bucket that match the criteria.
+
+        Args:
+            output_dir: Directory to save images
+            bucket_name: Name of the S3 bucket
+            prefix: Prefix to filter objects in the bucket (e.g., "overlay/CO_Arkansas_River_near_Nathrop/")
+                    If None, will try to construct using metadata
+            date_filter: If provided, only download images from this date
+
+        Returns:
+            Dictionary mapping datetime to local image paths
+        """
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Create anonymous S3 client (for public buckets)
+        s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+
+        # If prefix not provided, try to create one from metadata
+        if prefix is None:
+            if "state" in self.meta_data and "station_nm" in self.meta_data:
+                state = self.meta_data.get("state", "")
+                river_name = self.meta_data.get("station_nm", "").replace(" ", "_")
+                camera_id = f"{state}_{river_name}"
+                prefix = f"overlay/{camera_id}/"
+            else:
+                logger.warning("Could not construct prefix from metadata. Using empty prefix.")
+                prefix = ""
+
+        logger.info(f"Listing objects in bucket: {bucket_name} with prefix: {prefix}")
+
+        # Initialize result dictionary
+        image_paths = {}
+
+        # For pagination
+        continuation_token = None
+
+        # Define regex pattern to extract datetime from filenames
+        # Pattern like: CO_Arkansas_River_near_Nathrop___2025-05-04T16-30-53Z.jpg
+        datetime_pattern = re.compile(r'___(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)\.jpg$')
+
+        # Track files for debugging
+        total_files = 0
+        matching_files = 0
+
+        while True:
+            # List objects in the bucket
+            if continuation_token:
+                response = s3_client.list_objects_v2(
+                    Bucket=bucket_name,
+                    Prefix=prefix,
+                    ContinuationToken=continuation_token
+                )
+            else:
+                response = s3_client.list_objects_v2(
+                    Bucket=bucket_name,
+                    Prefix=prefix
+                )
+
+            # Process each object
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    total_files += 1
+                    key = obj['Key']
+
+                    # Extract datetime from filename
+                    match = datetime_pattern.search(key)
+                    if match:
+                        timestamp_str = match.group(1)
+                        try:
+                            # Parse the datetime
+                            img_datetime = datetime.strptime(timestamp_str, "%Y-%m-%dT%H-%M-%SZ")
+
+                            # Apply date filter if provided
+                            if date_filter is not None:
+                                if img_datetime.date() != date_filter.date():
+                                    continue
+                            # Apply range filter if no specific date provided
+                            elif not (self.start_time <= img_datetime <= self.end_time):
+                                continue
+
+                            matching_files += 1
+
+                            # Create local filename
+                            site_id = self.meta_data.get("site_number", "unknown")
+                            local_filename = os.path.join(
+                                output_dir,
+                                f"{site_id}_{img_datetime.strftime('%Y%m%d_%H%M%S')}.jpg"
+                            )
+
+                            # Download the image
+                            logger.info(f"Downloading {key} to {local_filename}")
+                            s3_client.download_file(bucket_name, key, local_filename)
+
+                            # Store mapping of datetime to image path
+                            image_paths[img_datetime] = local_filename
+
+                            # Add delay to avoid overwhelming the server
+                            time.sleep(0.1)
+                        except ValueError as e:
+                            logger.warning(f"Could not parse datetime from {timestamp_str}: {e}")
+
+            # Check if there are more results
+            if not response.get('IsTruncated'):
+                break
+
+            continuation_token = response.get('NextContinuationToken')
+
+        logger.info(f"Found {total_files} total files, {matching_files} matching date criteria")
+        logger.info(f"Successfully downloaded {len(image_paths)} images")
+
+        return image_paths
+
+    def find_s3_camera_prefixes(self, bucket_name: str = "usgs-nims-images") -> list:
+        """
+        Searches the S3 bucket to find all possible camera prefixes.
+        Useful when you don't know the exact prefix pattern.
+
+        Args:
+            bucket_name: Name of the S3 bucket
+
+        Returns:
+            List of camera prefixes found in the bucket
+        """
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+
+        # Create anonymous S3 client
+        s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+
+        # Possible prefixes to check
+        prefixes_to_check = ["overlay/", "images/", ""]
+
+        # Find actual station name from metadata
+        state = self.meta_data.get("state", "")
+        river_name = self.meta_data.get("station_nm", "")
+        station_number = self.meta_data.get("site_number", "")
+
+        # Generate possible patterns to look for
+        search_patterns = []
+
+        if state and river_name:
+            # Standard format: ST_River_Name
+            search_patterns.append(f"{state}_{river_name.replace(' ', '_')}")
+
+            # Try with different separators
+            search_patterns.append(f"{state}-{river_name.replace(' ', '-')}")
+            search_patterns.append(f"{state}{river_name.replace(' ', '')}")
+
+            # Try with site number
+            if station_number:
+                search_patterns.append(f"{state}_{station_number}")
+                search_patterns.append(f"{station_number}")
+
+        found_prefixes = []
+
+        for base_prefix in prefixes_to_check:
+            logger.info(f"Checking base prefix: {base_prefix}")
+
+            # List the common prefixes at this level
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=base_prefix,
+                Delimiter='/'
+            )
+
+            # Check common prefixes
+            if 'CommonPrefixes' in response:
+                for prefix_obj in response['CommonPrefixes']:
+                    prefix = prefix_obj['Prefix']
+                    logger.info(f"Found prefix: {prefix}")
+
+                    # Check if this prefix might match our station
+                    for pattern in search_patterns:
+                        if pattern.lower() in prefix.lower():
+                            found_prefixes.append(prefix)
+                            logger.info(f"✓ Matched pattern '{pattern}': {prefix}")
+
+            # Check direct listing for any matching files
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+
+                    for pattern in search_patterns:
+                        if pattern.lower() in key.lower():
+                            # Extract the prefix part
+                            parts = key.split('/')
+                            if len(parts) > 1:
+                                derived_prefix = '/'.join(parts[:-1]) + '/'
+                                if derived_prefix not in found_prefixes:
+                                    found_prefixes.append(derived_prefix)
+                                    logger.info(f"✓ Derived prefix from key '{key}': {derived_prefix}")
+                            break
+
+        logger.info(f"Found {len(found_prefixes)} possible camera prefixes")
+        return found_prefixes
+
+    def download_all_station_images(self, output_dir: str = "river_images"):
+        """
+        Comprehensive method to find and download all images for the current station.
+        First attempts to discover the correct S3 prefixes, then downloads all matching images.
 
         Args:
             output_dir: Directory to save images
@@ -219,65 +430,36 @@ class HydroScraper(object):
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger(__name__)
 
-        os.makedirs(output_dir, exist_ok=True)
+        # First, try to find all possible prefixes
+        possible_prefixes = self.find_s3_camera_prefixes()
 
-        site_id = self.meta_data["site_number"]
-        state = self.meta_data.get("state", "")
-        river_name = self.meta_data.get("station_nm", "").replace(" ", "_")
+        # If we found any prefixes, use them to download images
+        if possible_prefixes:
+            all_images = {}
 
-        image_paths = {}
-        current_time = self.start_time
+            for prefix in possible_prefixes:
+                logger.info(f"Downloading images using prefix: {prefix}")
+                images = self.list_and_download_s3_images(
+                    output_dir=output_dir,
+                    prefix=prefix
+                )
 
-        while current_time <= self.end_time:
-            try:
-                # Only attempt during daylight hours (6 AM to 8 PM)
-                if 6 <= current_time.hour <= 20:
-                    # Format timestamp for URL - ensure UTC
-                    utc_time = current_time.astimezone(pytz.UTC)
-                    formatted_time = utc_time.strftime("%Y-%m-%dT%H-%M-%SZ")
+                # Merge images into all_images
+                all_images.update(images)
 
-                    # Create camera ID and image filename
-                    camera_id = f"{state}_{river_name}"
-                    filename = f"{camera_id}___{formatted_time}.jpg"
+            return all_images
+        else:
+            # If no prefixes found, try with a constructed prefix
+            state = self.meta_data.get("state", "")
+            river_name = self.meta_data.get("station_nm", "").replace(" ", "_")
+            camera_id = f"{state}_{river_name}"
+            prefix = f"overlay/{camera_id}/"
 
-                    # Generate URL - note the new structure
-                    # https://apps.usgs.gov/hivis/camera/NC_Briar_Creek_near_Charlotte#&gid=hivis&pid=NC_Briar_Creek_near_Charlotte___2024-12-17T06-15-03Z.jpg
-                    url = f"https://apps.usgs.gov/hivis/camera/{camera_id}/images/{filename}"
-
-                    # Create local filename
-                    local_filename = os.path.join(
-                        output_dir,
-                        f"{site_id}_{current_time.strftime('%Y%m%d_%H%M%S')}.jpg"
-                    )
-
-                    # Download the image
-                    response = requests.get(url, timeout=10)
-
-                    if response.status_code == 200 and response.headers.get('content-type', '').startswith('image/'):
-                        with open(local_filename, 'wb') as f:
-                            f.write(response.content)
-
-                        # Store the mapping of datetime to image path
-                        image_paths[current_time] = local_filename
-                        logger.info(f"Downloaded: {local_filename}")
-                    else:
-                        logger.warning(
-                            f"Failed to download image for {current_time}: Status {response.status_code}")
-                        logger.warning(f"Attempted URL: {url}")
-
-                # Add delay to avoid overwhelming the server
-                time.sleep(0.5)
-
-            except Exception as e:
-                logger.error(f"Error downloading image for {current_time}: {str(e)}")
-                logger.error(f"Failed URL: {url}")
-
-            current_time += timedelta(minutes=60)
-
-        if not image_paths:
-            logger.warning(f"No images were successfully downloaded for site {site_id}")
-
-        return image_paths
+            logger.info(f"No prefixes discovered. Trying constructed prefix: {prefix}")
+            return self.list_and_download_s3_images(
+                output_dir=output_dir,
+                prefix=prefix
+            )
 
     def add_image_paths_to_df(self):
         """

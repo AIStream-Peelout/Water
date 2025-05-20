@@ -3,6 +3,9 @@ import pandas as pd
 from datetime import datetime
 from typing import Tuple, Dict
 import requests
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
 
 
 def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):

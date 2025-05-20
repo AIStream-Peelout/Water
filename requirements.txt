@@ -4,3 +4,4 @@ google-cloud-bigquery[pandas]
 google-cloud-storage
 redis
 pytest
+boto3
