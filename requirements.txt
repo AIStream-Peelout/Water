@@ -1,5 +1,6 @@
 pandas
-requests 
+scipy
+requests
 google-cloud-bigquery[pandas]
 google-cloud-storage
 redis
