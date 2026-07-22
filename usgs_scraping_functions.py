@@ -110,7 +110,7 @@ def df_label(usgs_text: str) -> str:
         return usgs_text
 
 
-def create_csv(file_path: str, params_names: dict, site_number: str): 
+def create_csv(file_path: str, params_names: dict, site_number: str):
     """
     Function that creates the final version of the CSV file
     Assigns
@@ -120,3 +120,78 @@ def create_csv(file_path: str, params_names: dict, site_number: str):
     for key, value in params_names.items():
         df[value] = df[key]
     df.to_csv(site_number + "_flow_data.csv")
+
+
+def get_site_metadata(site_number: str) -> Dict:
+    """
+    Fetches static gauge attributes from the NWIS site service (expanded output).
+
+    Useful static catchment attributes include drain_area_va (drainage area, sq mi),
+    contrib_drain_area_va, alt_va (gauge altitude, ft), huc_cd, dec_lat_va and dec_long_va.
+
+    :param site_number: The USGS gauge site number, e.g. "01010500".
+    :type site_number: str
+    :return: A dict of the site's attributes with numeric fields parsed to floats where possible.
+    :rtype: Dict
+    """
+    base_url = "https://waterservices.usgs.gov/nwis/site/?format=rdb&sites={}&siteOutput=expanded"
+    response = requests.get(base_url.format(site_number), timeout=60)
+    response.raise_for_status()
+    lines = [line for line in response.text.splitlines() if not line.startswith("#")]
+    if len(lines) < 3:
+        raise ValueError("NWIS returned no site data for " + site_number)
+    header = lines[0].split("\t")
+    values = lines[2].split("\t")
+    metadata: Dict = {}
+    numeric_fields = {"dec_lat_va", "dec_long_va", "alt_va", "drain_area_va", "contrib_drain_area_va"}
+    for key, value in zip(header, values):
+        if key in numeric_fields:
+            try:
+                metadata[key] = float(value)
+            except ValueError:
+                metadata[key] = None
+        else:
+            metadata[key] = value
+    return metadata
+
+
+def get_basin_boundary(site_number: str) -> Dict:
+    """
+    Fetches the upstream basin boundary polygon for a gauge from the USGS NLDI service.
+
+    The polygon defines the catchment footprint and is the natural bounding geometry for extracting
+    satellite image patches around a gauge.
+
+    :param site_number: The USGS gauge site number, e.g. "01010500".
+    :type site_number: str
+    :return: The GeoJSON geometry dict (type + coordinates) of the basin polygon.
+    :rtype: Dict
+    """
+    base_url = "https://api.water.usgs.gov/nldi/linked-data/nwissite/USGS-{}/basin?f=json"
+    response = requests.get(base_url.format(site_number), timeout=120)
+    response.raise_for_status()
+    features = response.json().get("features", [])
+    if not features:
+        raise ValueError("NLDI returned no basin for site " + site_number)
+    return features[0]["geometry"]
+
+
+def basin_bounding_box(geometry: Dict, buffer_degrees: float = 0.0) -> Tuple[float, float, float, float]:
+    """
+    Computes the (min_lon, min_lat, max_lon, max_lat) bounding box of a GeoJSON polygon geometry.
+
+    :param geometry: A GeoJSON Polygon or MultiPolygon geometry dict.
+    :type geometry: Dict
+    :param buffer_degrees: A buffer to expand the box on every side in decimal degrees, defaults to 0.0.
+    :type buffer_degrees: float, optional
+    :return: The bounding box as (min_lon, min_lat, max_lon, max_lat).
+    :rtype: Tuple[float, float, float, float]
+    """
+    rings = geometry["coordinates"]
+    if geometry.get("type") == "Polygon":
+        rings = [rings]
+    points = [point for polygon in rings for ring in polygon for point in ring]
+    lons = [point[0] for point in points]
+    lats = [point[1] for point in points]
+    return (min(lons) - buffer_degrees, min(lats) - buffer_degrees,
+            max(lons) + buffer_degrees, max(lats) + buffer_degrees)
