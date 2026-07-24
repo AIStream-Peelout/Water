@@ -34,6 +34,14 @@ class TestCatchmentBundle(unittest.TestCase):
         self.assertGreater(len(soil_cols), 0)
         self.assertGreater(hourly[soil_cols[0]].notna().sum(), 0)
 
+    def test_asos_surface_obs_joined(self):
+        hourly = self.bundle["hourly"]
+        self.assertIn("tmpf", hourly.columns)
+        self.assertIn("p01m", hourly.columns)
+        self.assertGreater(hourly["tmpf"].notna().sum(), 12)
+        self.assertIn("asos_station_id", self.bundle["static"])
+        self.assertLess(self.bundle["static"]["asos_distance_km"], 50.0)
+
     def test_basin_geometry_written(self):
         self.assertIn(self.bundle["basin_geometry"]["type"], ("Polygon", "MultiPolygon"))
         geojson_path = os.path.join(self.output_dir, "06752260_basin.geojson")

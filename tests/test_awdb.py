@@ -3,8 +3,8 @@ import unittest
 
 import pandas as pd
 
-from awdb_functions import (get_awdb_stations, find_nearest_awdb_station, get_scan_soil_moisture,
-                            get_snotel_awdb_data)
+from awdb_functions import (get_awdb_stations, find_nearest_awdb_station, find_best_scan_station,
+                            get_element_begin_date, get_scan_soil_moisture, get_snotel_awdb_data)
 
 
 class TestAwdbScraping(unittest.TestCase):
@@ -41,6 +41,17 @@ class TestAwdbScraping(unittest.TestCase):
         self.assertIn("WTEQ", df.columns)
         self.assertEqual(len(df), 10)
         self.assertTrue((df["WTEQ"].dropna() >= 0).all())
+
+    def test_element_begin_date_is_sensor_level(self):
+        """The SMS begin must come from sensor metadata (1997), not the station listing (2013)."""
+        self.assertEqual(get_element_begin_date("2017:CO:SCAN"), "1997-03-17")
+
+    def test_best_scan_station_prefers_record_length(self):
+        """Near the Poudre gauge, Nunn #1 (SMS since 1997) must beat the nearer CPER (since 2013)."""
+        best = find_best_scan_station(40.588, -105.069)
+        self.assertEqual(best["stationTriplet"], "2017:CO:SCAN")
+        self.assertEqual(best["element_begin"], "1997-03-17")
+        self.assertLess(best["distance_km"], 75.0)
 
     def test_utc_offset_shifts_timestamps(self):
         df = get_scan_soil_moisture("2017:CO:SCAN", datetime(2023, 6, 1), datetime(2023, 6, 1, 3),

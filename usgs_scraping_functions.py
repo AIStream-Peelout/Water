@@ -155,6 +155,42 @@ def get_site_metadata(site_number: str) -> Dict:
     return metadata
 
 
+def get_period_of_record(site_number: str) -> Dict[str, Dict[str, str]]:
+    """
+    Fetches the period of record per parameter and data type from the NWIS series catalog.
+
+    The instantaneous ("uv") record usually starts decades after the daily ("dv") record — e.g. gauge
+    06752260 has daily flow from 1975 but 15-minute flow only from 1987 — so long hourly scrapes should
+    start at the uv begin date.
+
+    :param site_number: The USGS gauge site number, e.g. "06752260".
+    :type site_number: str
+    :return: A dict keyed by "<data_type>_<param>" (e.g. "uv_00060") with "begin_date", "end_date" and
+        "count" for each series.
+    :rtype: Dict[str, Dict[str, str]]
+    """
+    base_url = ("https://waterservices.usgs.gov/nwis/site/?format=rdb&sites={}"
+                "&seriesCatalogOutput=true&siteStatus=all")
+    response = requests.get(base_url.format(site_number), timeout=60)
+    response.raise_for_status()
+    lines = [line for line in response.text.splitlines() if not line.startswith("#")]
+    header = lines[0].split("\t")
+    idx = {name: header.index(name) for name in
+           ("data_type_cd", "parm_cd", "begin_date", "end_date", "count_nu")}
+    catalog: Dict[str, Dict[str, str]] = {}
+    for line in lines[2:]:
+        fields = line.split("\t")
+        if len(fields) < len(header) or not fields[idx["parm_cd"]]:
+            continue
+        key = fields[idx["data_type_cd"]] + "_" + fields[idx["parm_cd"]]
+        entry = {"begin_date": fields[idx["begin_date"]], "end_date": fields[idx["end_date"]],
+                 "count": fields[idx["count_nu"]]}
+        # A site can have multiple entries per series (e.g. multiple sensors); keep the earliest begin.
+        if key not in catalog or entry["begin_date"] < catalog[key]["begin_date"]:
+            catalog[key] = entry
+    return catalog
+
+
 def get_basin_boundary(site_number: str) -> Dict:
     """
     Fetches the upstream basin boundary polygon for a gauge from the USGS NLDI service.

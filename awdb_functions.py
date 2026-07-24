@@ -67,6 +67,84 @@ def find_nearest_awdb_station(latitude: float, longitude: float, network: str = 
     return nearest
 
 
+def get_element_begin_date(station_triplet: str, element_code: str = "SMS",
+                           duration: Optional[str] = "HOURLY") -> Optional[str]:
+    """
+    Returns the earliest begin date of a station's sensors for an element (e.g. soil moisture).
+
+    Uses the per-element metadata from ``returnStationElements=true``, which is authoritative — the
+    ``beginDate`` on station records in bulk listings can reflect metadata revisions rather than
+    actual sensor history (observed for SCAN: listing said 2013 while hourly SMS data exists from 1997).
+
+    :param station_triplet: The AWDB station triplet, e.g. "2017:CO:SCAN".
+    :type station_triplet: str
+    :param element_code: The element code, defaults to "SMS" (soil moisture).
+    :type element_code: str, optional
+    :param duration: Restrict to a duration name (e.g. "HOURLY"); falls back to any duration when no
+        sensor matches. Defaults to "HOURLY".
+    :type duration: str, optional
+    :return: The earliest begin date as an ISO date string, or None when the station lacks the element.
+    :rtype: str, optional
+    """
+    params = {"stationTriplets": station_triplet, "returnStationElements": "true"}
+    response = requests.get(AWDB_BASE_URL + "/stations", params=params, timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+    if not payload:
+        return None
+    elements = [element for element in payload[0].get("stationElements", [])
+                if element["elementCode"] == element_code]
+    if duration is not None:
+        matching_duration = [element for element in elements
+                             if element.get("durationName") == duration]
+        elements = matching_duration or elements
+    begins = [element["beginDate"] for element in elements if element.get("beginDate")]
+    if not begins:
+        return None
+    return str(pd.Timestamp(min(begins)).date())
+
+
+def find_best_scan_station(latitude: float, longitude: float, max_distance_km: float = 75.0,
+                           element_code: str = "SMS") -> Optional[Dict]:
+    """
+    Finds the SCAN station near a point with the longest record of an element.
+
+    Pure nearest-distance selection can be costly: near the Cache la Poudre gauge, CPER (39.9 km) only
+    records soil moisture from 2013 while Nunn #1 (41 km) records from 1997 — so among all stations
+    within the distance cap this picks the earliest element begin date, breaking ties by distance.
+
+    :param latitude: The latitude of the point in decimal degrees.
+    :type latitude: float
+    :param longitude: The longitude of the point in decimal degrees.
+    :type longitude: float
+    :param max_distance_km: Only consider stations within this distance, defaults to 75.0.
+    :type max_distance_km: float, optional
+    :param element_code: The element whose record length is optimized, defaults to "SMS".
+    :type element_code: str, optional
+    :return: The chosen station record with added "distance_km" and "element_begin" keys, or None
+        when no station within range records the element.
+    :rtype: Dict, optional
+    """
+    stations = get_awdb_stations(network="SCAN")
+    lat1, lon1 = math.radians(latitude), math.radians(longitude)
+    lat2 = stations["latitude"].map(math.radians)
+    lon2 = stations["longitude"].map(math.radians)
+    hav = ((lat2 - lat1) / 2).map(math.sin) ** 2 + math.cos(lat1) * lat2.map(math.cos) * \
+        ((lon2 - lon1) / 2).map(math.sin) ** 2
+    stations = stations.assign(distance_km=2 * 6371.0 * hav.map(math.sqrt).map(math.asin))
+    candidates = stations[stations["distance_km"] <= max_distance_km].sort_values("distance_km")
+    best: Optional[Dict] = None
+    for _, candidate in candidates.iterrows():
+        begin = get_element_begin_date(candidate["stationTriplet"], element_code=element_code)
+        if begin is None:
+            continue
+        if best is None or begin < best["element_begin"]:
+            record = candidate.to_dict()
+            record["element_begin"] = begin
+            best = record
+    return best
+
+
 def get_awdb_element_data(station_triplet: str, elements: List[str], start_time: datetime,
                           end_time: datetime, duration: str = "HOURLY",
                           utc_offset_hours: Optional[float] = None) -> pd.DataFrame:
