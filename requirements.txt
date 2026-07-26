@@ -7,3 +7,9 @@ google-cloud-storage
 redis
 pytest
 boto3
+rasterio
+mgrs
+plotly
+matplotlib
+pillow
+scikit-learn
