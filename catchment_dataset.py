@@ -22,8 +22,10 @@ from typing import Dict, Optional
 import pandas as pd
 import pytz
 
+import requests
+
 from awdb_functions import find_best_scan_station, get_element_begin_date, get_scan_soil_moisture
-from gages2_functions import download_gages2, get_gages2_attributes
+from gages2_functions import download_gages2, gauge_in_gages2, get_gages2_attributes
 from nldas_functions import get_nldas_forcing
 from scrape_text import timezone_map
 from weather_scraping_functions import FIPS_TO_STATE, find_nearest_asos_station, get_hourly_asos
@@ -92,13 +94,20 @@ def discover_catchment(site_number: str, include_basin: bool = True, include_aso
 
     if gages2_zip_path is not None:
         download_gages2(gages2_zip_path)
-        for key, value in get_gages2_attributes(site_number, gages2_zip_path).items():
-            static["gages2_" + key] = value
+        static["gages2_available"] = gauge_in_gages2(site_number, gages2_zip_path)
+        if static["gages2_available"]:
+            for key, value in get_gages2_attributes(site_number, gages2_zip_path).items():
+                static["gages2_" + key] = value
 
     basin_geometry = None
     if include_basin:
-        basin_geometry = get_basin_boundary(site_number)
-        static["basin_bbox"] = basin_bounding_box(basin_geometry, buffer_degrees=0.05)
+        # Not every gauge is indexed by NLDI; a missing basin must not fail a fleet scrape.
+        try:
+            basin_geometry = get_basin_boundary(site_number)
+        except (requests.HTTPError, ValueError):
+            static["basin_available"] = False
+        if basin_geometry is not None:
+            static["basin_bbox"] = basin_bounding_box(basin_geometry, buffer_degrees=0.05)
 
     asos_station = None
     if include_asos:

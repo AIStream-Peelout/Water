@@ -65,6 +65,21 @@ def load_gages2_table(table_name: str, zip_path: str) -> pd.DataFrame:
                                encoding="latin-1")
 
 
+def gauge_in_gages2(site_number: str, zip_path: str) -> bool:
+    """
+    Checks whether a gauge is one of the 9,067 covered by GAGES-II.
+
+    :param site_number: The USGS gauge site number.
+    :type site_number: str
+    :param zip_path: Path to the downloaded GAGES-II archive.
+    :type zip_path: str
+    :return: True when the gauge has GAGES-II attributes.
+    :rtype: bool
+    """
+    table = load_gages2_table("conterm_basinid.txt", zip_path)
+    return bool((table["STAID"] == site_number).any())
+
+
 def get_gages2_attributes(site_number: str, zip_path: str,
                           tables: Optional[List[str]] = None) -> Dict:
     """

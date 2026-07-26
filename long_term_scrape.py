@@ -25,7 +25,7 @@ import pandas as pd
 
 from backup_functions import upload_directory_to_gcs
 from build_pilot_dataset import load_dotenv
-from catchment_dataset import discover_catchment, fetch_hourly_chunk
+from catchment_dataset import discover_catchment, fetch_hourly_chunk, get_data_availability
 from usgs_scraping_functions import get_period_of_record
 
 
@@ -100,6 +100,8 @@ def run_long_term_scrape(site_number: str, start_time: Optional[datetime] = None
     os.makedirs(chunks_dir, exist_ok=True)
 
     discovery = discover_catchment(site_number, gages2_zip_path=gages2_zip_path)
+    # Record when each source begins so training can pick a fully-aligned start per river.
+    discovery["static"]["data_availability"] = get_data_availability(site_number, discovery=discovery)
     with open(os.path.join(output_dir, site_number + "_static.json"), "w") as f:
         json.dump(discovery["static"], f, default=str)
     if discovery["basin_geometry"] is not None:
@@ -137,11 +139,15 @@ def run_long_term_scrape(site_number: str, start_time: Optional[datetime] = None
 
     summary = {"site": site_number, "start": str(start_time.date()), "end": str(end_time.date()),
                "chunks_fetched": fetched, "chunks_skipped_existing": skipped,
-               "chunk_failures": failures, "combined_rows": int(len(combined))}
+               "chunk_failures": failures, "combined_rows": int(len(combined)),
+               "data_availability": discovery["static"]["data_availability"]}
     with open(os.path.join(output_dir, site_number + "_scrape_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     if backup:
-        backup_summary = upload_directory_to_gcs(output_dir, prefix=os.path.basename(output_dir))
+        # Mirror the local path under claude_data/ (e.g. pilot_data/06752260_full) so GCS and local
+        # layouts stay identical.
+        backup_summary = upload_directory_to_gcs(output_dir,
+                                                 prefix=os.path.normpath(output_dir).replace(os.sep, "/"))
         summary["backup"] = backup_summary
     return summary
 

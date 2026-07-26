@@ -30,8 +30,7 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     with open(site_number + ".txt", "w") as f:
         f.write(r.text)
     response_data = process_response_text(site_number + ".txt")
-    create_csv(response_data[0], response_data[1], site_number)
-    return pd.read_csv(site_number + "_flow_data.csv")
+    return create_csv(response_data[0], response_data[1], site_number)
 
 
 def column_renamer(x):
@@ -75,7 +74,8 @@ def process_response_text(file_name: str)->Tuple[str, Dict]:
         lines = f.readlines()
         i = 0
         params = False
-        while "#" in lines[i]:
+        # A window with no data returns only comment lines, so the loop must also stop at EOF.
+        while i < len(lines) and "#" in lines[i]:
             # TODO figure out getting height and discharge code efficently
             the_split_line = lines[i].split()[1:]
             if params:
@@ -116,10 +116,15 @@ def create_csv(file_path: str, params_names: dict, site_number: str):
     Assigns
     """
     print(params_names)
+    import os
+    if os.path.getsize(file_path) == 0:
+        pd.DataFrame().to_csv(site_number + "_flow_data.csv")
+        return pd.DataFrame()
     df = pd.read_csv(file_path, sep="\t")
     for key, value in params_names.items():
         df[value] = df[key]
     df.to_csv(site_number + "_flow_data.csv")
+    return df
 
 
 def get_site_metadata(site_number: str) -> Dict:

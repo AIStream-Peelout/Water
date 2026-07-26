@@ -21,6 +21,9 @@ from google.cloud import storage
 
 DEFAULT_BUCKET = "flow_hydro_2_data"
 DEFAULT_PROJECT = "hydro-earthnet-db"
+# All automated writes live under this namespace so they are auditable and safely disposable without
+# ever touching (or making anyone wonder about) the rest of the bucket.
+BACKUP_ROOT_PREFIX = "claude_data"
 
 
 def upload_directory_to_gcs(local_dir: str, bucket_name: str = DEFAULT_BUCKET, prefix: str = "",
@@ -49,7 +52,8 @@ def upload_directory_to_gcs(local_dir: str, bucket_name: str = DEFAULT_BUCKET, p
         for name in files:
             local_path = os.path.join(root, name)
             relative = os.path.relpath(local_path, local_dir)
-            blob_name = "/".join(filter(None, [prefix, relative.replace(os.sep, "/")]))
+            blob_name = "/".join(filter(None, [BACKUP_ROOT_PREFIX, prefix,
+                                               relative.replace(os.sep, "/")]))
             size = os.path.getsize(local_path)
             if skip_existing:
                 existing = bucket.get_blob(blob_name)
@@ -60,6 +64,28 @@ def upload_directory_to_gcs(local_dir: str, bucket_name: str = DEFAULT_BUCKET, p
             uploaded += 1
             bytes_uploaded += size
     return {"uploaded": uploaded, "skipped": skipped, "bytes_uploaded": bytes_uploaded}
+
+
+def upload_file(local_path: str, blob_prefix: str, bucket_name: str = DEFAULT_BUCKET,
+                project: str = DEFAULT_PROJECT) -> None:
+    """
+    Uploads a single file into the claude_data/ namespace (e.g. a scrape registry).
+
+    :param local_path: The local file to upload.
+    :type local_path: str
+    :param blob_prefix: The prefix under claude_data/ to place the file in.
+    :type blob_prefix: str
+    :param bucket_name: The destination bucket, defaults to "flow_hydro_2_data".
+    :type bucket_name: str, optional
+    :param project: The GCP project of the bucket, defaults to "hydro-earthnet-db".
+    :type project: str, optional
+    :return: None
+    :rtype: None
+    """
+    client = storage.Client(project=project)
+    blob_name = "/".join(filter(None, [BACKUP_ROOT_PREFIX, blob_prefix,
+                                       os.path.basename(local_path)]))
+    client.bucket(bucket_name).blob(blob_name).upload_from_filename(local_path)
 
 
 def main() -> None:
@@ -80,9 +106,9 @@ def main() -> None:
     prefix = args.prefix if args.prefix is not None else os.path.basename(os.path.normpath(args.dir))
     summary = upload_directory_to_gcs(args.dir, bucket_name=args.bucket, prefix=prefix,
                                       project=args.project, skip_existing=not args.force)
-    print("Backup complete: %d uploaded (%.1f MB), %d skipped (already in gs://%s/%s)" %
+    print("Backup complete: %d uploaded (%.1f MB), %d skipped (already in gs://%s/%s/%s)" %
           (summary["uploaded"], summary["bytes_uploaded"] / 1e6, summary["skipped"],
-           args.bucket, prefix))
+           args.bucket, BACKUP_ROOT_PREFIX, prefix))
 
 
 if __name__ == "__main__":

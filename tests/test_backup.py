@@ -41,7 +41,7 @@ class TestGcsBackup(unittest.TestCase):
             self.assertEqual(second["uploaded"], 0)
             self.assertEqual(second["skipped"], 1)
         client = storage.Client(project=DEFAULT_PROJECT)
-        blob = client.bucket(DEFAULT_BUCKET).blob("test_backup_ci/sub/sample.txt")
+        blob = client.bucket(DEFAULT_BUCKET).blob("claude_data/test_backup_ci/sub/sample.txt")
         self.assertTrue(blob.exists())
 
 

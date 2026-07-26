@@ -43,6 +43,17 @@ class TestPeriodOfRecord(unittest.TestCase):
         self.assertLess(catalog["dv_00060"]["begin_date"], catalog["uv_00060"]["begin_date"])
 
 
+class TestGapWindow(unittest.TestCase):
+    """Live test of an empty window (before the gauge's instantaneous record begins in 1987)."""
+
+    def test_empty_window_returns_empty_frame(self):
+        from catchment_dataset import discover_catchment, fetch_hourly_chunk
+        discovery = discover_catchment("06752260", include_basin=False, include_asos=False,
+                                       include_soil_moisture=False)
+        chunk = fetch_hourly_chunk("06752260", datetime(1980, 1, 1), datetime(1980, 3, 1), discovery)
+        self.assertTrue(chunk.empty)
+
+
 class TestLongTermScrape(unittest.TestCase):
     """Live two-chunk smoke test of the resumable scrape (no NLDAS, no backup)."""
 
