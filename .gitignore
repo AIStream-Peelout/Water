@@ -129,3 +129,13 @@ dmypy.json
 .pyre/
 .DS_Store
 river_images
+pilot_data/
+
+# Scraper intermediate files written to the repo root by the USGS/ASOS fetch functions
+# (root-anchored so committed test fixtures under tests/ are unaffected)
+/[0-9]*.txt
+/[0-9]*data.tsv
+/[0-9]*_flow_data.csv
+/temp_weather_data.csv
+/[A-Z0-9][A-Z0-9][A-Z0-9].csv
+/[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9].csv

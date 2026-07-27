@@ -13,3 +13,4 @@ plotly
 matplotlib
 pillow
 scikit-learn
+netCDF4
