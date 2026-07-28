@@ -116,10 +116,27 @@ def read_snodas_swe(tar_path: str) -> Dict:
         header_name = _member_for_product(names, ".txt")
         data_bytes = archive.extractfile(data_name).read()
         header_bytes = archive.extractfile(header_name).read()
-    if data_name.endswith(".gz"):
-        data_bytes = gzip.decompress(data_bytes)
-    if header_name.endswith(".gz"):
-        header_bytes = gzip.decompress(header_bytes)
+    if not data_name.endswith(".gz"):
+        data_bytes = gzip.compress(data_bytes)
+    if not header_name.endswith(".gz"):
+        header_bytes = gzip.compress(header_bytes)
+    return swe_grid_from_members(header_bytes, data_bytes)
+
+
+def swe_grid_from_members(header_gz: bytes, data_gz: bytes) -> Dict:
+    """
+    Parses a SNODAS SWE grid from the raw gzipped header/data member pair of a daily tar.
+
+    :param header_gz: The gzipped NOHRSC text header bytes.
+    :type header_gz: bytes
+    :param data_gz: The gzipped flat-binary grid bytes (16-bit signed big-endian).
+    :type data_gz: bytes
+    :return: A grid dict with "swe_mm" (2-D array, north to south), "lats" (descending), "lons",
+        "date" and the parsed "header".
+    :rtype: Dict
+    """
+    header_bytes = gzip.decompress(header_gz)
+    data_bytes = gzip.decompress(data_gz)
     header = parse_snodas_header(header_bytes.decode("ascii", errors="replace"))
     rows, cols = header["Number of rows"], header["Number of columns"]
     raw = np.frombuffer(data_bytes, dtype=">i2").astype(np.float64).reshape(rows, cols)
