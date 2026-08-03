@@ -185,7 +185,7 @@ def run_state_collection(state_abbrev: str, output_root: str = os.path.join("pil
     scene_window = (datetime(today.year - 1, 6, 1), datetime(today.year - 1, 10, 1))
 
     manifest_path = os.path.join(state_dir, "manifest.csv")
-    manifest: List[Dict] = pd.read_csv(manifest_path).to_dict("records") \
+    manifest: List[Dict] = pd.read_csv(manifest_path, dtype={"site_no": str}).to_dict("records") \
         if os.path.exists(manifest_path) else []
     done = {row["site_no"] for row in manifest}
     collected = 0
