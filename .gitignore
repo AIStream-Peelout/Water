@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 .DS_Store
 river_images
+
+# Local experiment tracking and generated state
+/wandb/
