@@ -1,8 +1,27 @@
 from datetime import datetime, timedelta
+import math
 import requests
 import pandas as pd
 import pytz
 import json
+
+ASOS_BASE_URL = ("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?station={}&data=tmpf&data=dwpf"
+                 "&data=relh&data=feel&data=sknt&data=sped&data=alti&data=mslp&data=drct"
+                 "&data=ice_accretion_1hr&data=p01m&data=vsby&data=gust&data=skyc1&data=peak_wind_gust"
+                 "&data=snowdepth&year1={}&month1={}&day1={}&year2={}&month2={}&day2={}&tz=Etc%2FUTC"
+                 "&format=onlycomma&latlon=no&elev=no&missing=M&trace=T&direct=no"
+                 "&report_type=3&report_type=4")
+
+# FIPS state codes (as returned by the NWIS site service) to postal abbreviations.
+FIPS_TO_STATE = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO", "09": "CT", "10": "DE",
+    "11": "DC", "12": "FL", "13": "GA", "15": "HI", "16": "ID", "17": "IL", "18": "IN", "19": "IA",
+    "20": "KS", "21": "KY", "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
+    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH", "34": "NJ", "35": "NM",
+    "36": "NY", "37": "NC", "38": "ND", "39": "OH", "40": "OK", "41": "OR", "42": "PA", "44": "RI",
+    "45": "SC", "46": "SD", "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
+    "54": "WV", "55": "WI", "56": "WY", "72": "PR",
+}
 
 
 def get_asos_data_from_url(station_id, base_url, start_time, end_time, station={}, stations_explored={}):
@@ -71,6 +90,87 @@ def format_dt(date_time_str: str) -> datetime:
         proper_datetime = proper_datetime + timedelta(hours=1)
         proper_datetime = proper_datetime.replace(minute=0)
     return proper_datetime
+
+
+def get_asos_stations(state_abbrev: str, network_type: str = "ASOS") -> pd.DataFrame:
+    """
+    Lists the stations of a state's ASOS network from the Iowa Mesonet geojson service.
+
+    :param state_abbrev: The two-letter state abbreviation, e.g. "CO".
+    :type state_abbrev: str
+    :param network_type: The Mesonet network suffix, defaults to "ASOS".
+    :type network_type: str, optional
+    :return: A dataframe with station_id, name, latitude, longitude, elevation and archive_begin columns.
+    :rtype: pd.DataFrame
+    """
+    url = "https://mesonet.agron.iastate.edu/geojson/network/{}_{}.geojson".format(state_abbrev,
+                                                                                  network_type)
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    records = []
+    for feature in response.json()["features"]:
+        lon, lat = feature["geometry"]["coordinates"][:2]
+        records.append({"station_id": feature["properties"]["sid"],
+                        "name": feature["properties"]["sname"],
+                        "latitude": lat, "longitude": lon,
+                        "elevation": feature["properties"].get("elevation"),
+                        "archive_begin": feature["properties"].get("archive_begin"),
+                        "online": feature["properties"].get("online")})
+    return pd.DataFrame(records)
+
+
+def find_nearest_asos_station(latitude: float, longitude: float, state_abbrev: str) -> dict:
+    """
+    Finds the ASOS station closest to a point (e.g. a USGS gauge).
+
+    :param latitude: The latitude of the point in decimal degrees.
+    :type latitude: float
+    :param longitude: The longitude of the point in decimal degrees.
+    :type longitude: float
+    :param state_abbrev: The two-letter state abbreviation to search in, e.g. "CO".
+    :type state_abbrev: str
+    :return: The station record of the nearest station with an added "distance_km" key.
+    :rtype: dict
+    """
+    stations = get_asos_stations(state_abbrev)
+    lat1, lon1 = math.radians(latitude), math.radians(longitude)
+    lat2 = stations["latitude"].map(math.radians)
+    lon2 = stations["longitude"].map(math.radians)
+    hav = ((lat2 - lat1) / 2).map(math.sin) ** 2 + math.cos(lat1) * lat2.map(math.cos) * \
+        ((lon2 - lon1) / 2).map(math.sin) ** 2
+    distance_km = 2 * 6371.0 * hav.map(math.sqrt).map(math.asin)
+    nearest = stations.iloc[distance_km.idxmin()].to_dict()
+    nearest["distance_km"] = distance_km.min()
+    return nearest
+
+
+def get_hourly_asos(station_id: str, start_time: datetime, end_time: datetime) -> pd.DataFrame:
+    """
+    Fetches hourly ASOS surface observations for a station as a tz-aware UTC dataframe.
+
+    A thin wrapper around :func:`get_asos_data_from_url` / :func:`process_asos_csv` (the request is made
+    in UTC, so the aggregated "hour_updated" timestamps are localized to UTC) that returns a dataframe
+    ready to merge on a "datetime" column.
+
+    :param station_id: The ASOS station id, e.g. "FNL".
+    :type station_id: str
+    :param start_time: The start of the requested period (UTC).
+    :type start_time: datetime
+    :param end_time: The end of the requested period (UTC).
+    :type end_time: datetime
+    :return: An hourly dataframe with a tz-aware UTC "datetime" column and the ASOS measurement columns
+        (tmpf, dwpf, relh, p01m, sknt, gust, snowdepth, ...).
+    :rtype: pd.DataFrame
+    """
+    csv_path = get_asos_data_from_url(station_id, ASOS_BASE_URL, start_time,
+                                      end_time + timedelta(days=1))
+    df, _, _ = process_asos_csv(csv_path)
+    if df.empty:
+        return pd.DataFrame(columns=["datetime"])
+    df["datetime"] = pd.to_datetime(df["hour_updated"]).dt.tz_localize("UTC")
+    df = df.drop(columns=["hour_updated", "valid"])
+    return df[(df["datetime"] >= pd.Timestamp(start_time, tz="UTC")) &
+              (df["datetime"] <= pd.Timestamp(end_time, tz="UTC"))].reset_index(drop=True)
 
 
 def get_snotel_data(start_time, end_time, station_id) -> pd.DataFrame:

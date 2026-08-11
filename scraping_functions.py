@@ -148,6 +148,9 @@ class HydroScraper(object):
         """
         Function that creates the final version of the CSV file. Called by `make_usgs_data`
         """
+        if os.path.getsize(file_path) == 0:
+            pd.DataFrame().to_csv(site_number + "_flow_data.csv")
+            return pd.DataFrame()
         df = pd.read_csv(file_path, sep="\t")
         for key, value in params_names.items():
             df[value] = df[key]
@@ -169,7 +172,8 @@ class HydroScraper(object):
             lines = f.readlines()
             i = 0
             params = False
-            while "#" in lines[i]:
+            # A window with no data returns only comment lines, so the loop must also stop at EOF.
+            while i < len(lines) and "#" in lines[i]:
                 # TODO figure out getting height and discharge code efficently
                 the_split_line = lines[i].split()[1:]
                 if params:
@@ -194,6 +198,10 @@ class HydroScraper(object):
             return
         self.snotel_df = get_snotel_data(self.start_time, self.end_time, self.meta_data["snotel"]["triplet"])
         self.snotel_df["Date"] = pd.to_datetime(self.snotel_df["Date"], utc=True)
+        # The Powderlines API returns all values as strings
+        for col in self.snotel_df.columns:
+            if col != "Date":
+                self.snotel_df[col] = pd.to_numeric(self.snotel_df[col], errors="coerce")
         self.final_df = self.joined_df.merge(self.snotel_df, left_on="hour_updated", right_on="Date", how="left")
         self.final_df["filled_snow"] = self.final_df["Snow Depth (in)"].interpolate(method='nearest').ffill().bfill()
 
@@ -206,7 +214,7 @@ class HydroScraper(object):
         """
         sentinel_df = sentinel_df[sentinel_df["mgrs_tile"]==tile]
         sentinel_df = sentinel_df[["sensing_time", "base_url"]]
-        sentinel_df["sensing_time"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').round('60min')
+        sentinel_df["sensing_time"] = pd.to_datetime(sentinel_df["sensing_time"], utc=True, format='mixed').dt.round('60min')
         self.final_df = self.final_df.merge(sentinel_df, left_on="hour_updated", right_on="sensing_time", how="left")
 
     def write_final_df_to_bq(self, table_name: str):
@@ -474,7 +482,9 @@ class HydroScraper(object):
         image_df = image_df.reset_index()
 
         # Round timestamps to hour to match with final_df
-        image_df['hour_updated'] = image_df['datetime'].dt.round('H')
+        # Filename timestamps are UTC (trailing Z); localize so the merge key
+        # matches the tz-aware hour_updated column
+        image_df['hour_updated'] = image_df['datetime'].dt.round('h').dt.tz_localize('UTC')
 
         # Group by hour and aggregate paths into lists
         image_df = image_df.groupby('hour_updated')['image_path'].agg(lambda x: list(x)).reset_index()
