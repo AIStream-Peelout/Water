@@ -26,7 +26,10 @@ def make_usgs_data(start_date: datetime, end_date: datetime, site_number: str):
     full_url = base_url.format(site_number, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
     print("Getting request from USGS")
     print(full_url)
-    r = requests.get(full_url)
+    # Bounded read timeout: a silently stalled NWIS connection would otherwise hang the whole
+    # fleet scrape indefinitely (no bytes ever arrive, no error). 180s tolerates large multi-year
+    # chunks while turning a dead connection into a retryable per-chunk timeout.
+    r = requests.get(full_url, timeout=180)
     with open(site_number + ".txt", "w") as f:
         f.write(r.text)
     response_data = process_response_text(site_number + ".txt")

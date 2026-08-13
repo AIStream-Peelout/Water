@@ -185,6 +185,8 @@ def main() -> None:
     parser.add_argument("--no-nldas", action="store_true", help="Skip NLDAS-2 forcing")
     parser.add_argument("--no-backup", action="store_true", help="Skip GCS mirroring")
     parser.add_argument("--no-retry-failed", action="store_true", help="Do not retry failed gauges")
+    parser.add_argument("--no-snodas", action="store_true",
+                        help="Skip the automatic SNODAS SWE series companion for snow states")
     parser.add_argument("--report", action="store_true", help="Print registry status and exit")
     args = parser.parse_args()
     load_dotenv()
@@ -199,6 +201,45 @@ def main() -> None:
         print("WARNING: EARTHDATA_TOKEN not set; scraping without NLDAS-2 forcing.")
     run_state_scrape(args.state, limit=args.limit, include_nldas=include_nldas,
                      backup=not args.no_backup, retry_failed=not args.no_retry_failed)
+    if args.state in SNOW_STATES and not args.no_snodas:
+        launch_snodas_companion(args.state)
+
+
+# States with meaningful seasonal snowpack: their fleets need SNODAS SWE series for the
+# snow-store seeding in the hybrid model (learned the hard way — UT trained without snow
+# seeding and long-lead skill collapsed).
+SNOW_STATES = {"CO", "UT", "WY", "MT", "ID", "NV", "CA", "OR", "WA", "NM", "AZ", "AK",
+               "VT", "NH", "ME", "NY", "MI", "WI", "MN", "SD", "ND",
+               # Mid-Atlantic / interior-East states with meaningful (if transient) winter
+               # snowpack — worth SNODAS seeding for winter-event long-lead skill.
+               "PA", "WV", "MD", "VA", "OH", "IN", "IL", "IA", "MO", "KY", "NJ", "CT", "MA", "RI"}
+
+
+def launch_snodas_companion(state: str) -> None:
+    """
+    Launches the SNODAS daily-series builder for a snow state as a detached companion process.
+
+    The companion runs masks -> scrape (full archive, recent seasons first) -> compile and is
+    day-resumable, so repeated launches after interrupted scrapes are safe and cheap.
+
+    :param state: Two-letter state abbreviation.
+    :type state: str
+    :return: None
+    :rtype: None
+    """
+    import subprocess
+    import sys
+    log_path = "snodas_%s.log" % state.lower()
+    script = (
+        "{py} snodas_series_scrape.py masks --state {st} && "
+        "{py} snodas_series_scrape.py scrape --state {st} "
+        "--range 2014-10-01:2026-07-15 --range 2003-10-01:2014-09-30 && "
+        "{py} snodas_series_scrape.py compile --state {st}"
+    ).format(py=sys.executable, st=state)
+    with open(log_path, "a") as log:
+        subprocess.Popen(["/bin/sh", "-c", script], stdout=log, stderr=log,
+                         start_new_session=True)
+    print("Launched SNODAS companion for %s (log: %s)" % (state, log_path))
 
 
 if __name__ == "__main__":

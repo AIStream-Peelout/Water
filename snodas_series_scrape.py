@@ -42,15 +42,17 @@ SEASON_START = (10, 1)  # Oct 1
 SEASON_END = (7, 15)  # Jul 15
 
 
-def completed_sites(registry_path: str = REGISTRY_PATH) -> List[str]:
+def completed_sites(registry_path: Optional[str] = None) -> List[str]:
     """
     Lists registry sites marked completed that also have a cached basin boundary GeoJSON.
 
-    :param registry_path: The path of the CO scrape registry JSON.
+    :param registry_path: The path of the state scrape registry JSON; defaults to None, which
+        uses the module's active state (set by the CLI ``--state`` flag).
     :type registry_path: str, optional
     :return: The usable site ids, sorted.
     :rtype: List[str]
     """
+    registry_path = registry_path or REGISTRY_PATH
     with open(registry_path) as f:
         registry = json.load(f)
     sites = []
@@ -63,7 +65,7 @@ def completed_sites(registry_path: str = REGISTRY_PATH) -> List[str]:
 
 
 def build_masks(reference_date: datetime = datetime(2024, 6, 1),
-                masks_path: str = MASKS_PATH) -> Dict[str, np.ndarray]:
+                masks_path: Optional[str] = None) -> Dict[str, np.ndarray]:
     """
     Precomputes flat grid-cell indices inside each basin polygon on the fixed SNODAS masked grid.
 
@@ -88,6 +90,7 @@ def build_masks(reference_date: datetime = datetime(2024, 6, 1),
             continue
         masks[site] = indices
         print("mask %s: %d cells" % (site, len(indices)))
+    masks_path = masks_path or MASKS_PATH
     os.makedirs(os.path.dirname(masks_path), exist_ok=True)
     np.savez_compressed(masks_path, shape=np.array(grid["swe_mm"].shape), **masks)
     return masks
@@ -311,11 +314,21 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["masks", "scrape", "compile"])
+    parser.add_argument("--state", default="CO",
+                        help="Two-letter state whose scraped fleet the series covers")
     parser.add_argument("--range", action="append", default=[],
                         help="start:end date pair, e.g. 2022-12-01:2026-07-26; repeatable, "
                              "processed in order")
     parser.add_argument("--workers", type=int, default=6)
     args = parser.parse_args()
+    # The module's paths were written for the CO pilot; rewire them for the requested state so
+    # every command (masks/scrape/compile) reads and writes that state's fleet.
+    globals()["SERIES_DIR"] = os.path.join("pilot_data", "snodas_series", args.state)
+    globals()["MASKS_PATH"] = os.path.join("pilot_data", "snodas_series", args.state,
+                                           "basin_masks.npz")
+    globals()["REGISTRY_PATH"] = os.path.join("pilot_data", "scrapes", args.state,
+                                              "registry.json")
+    globals()["SCRAPES_DIR"] = os.path.join("pilot_data", "scrapes", args.state)
     if args.command == "masks":
         build_masks()
     elif args.command == "scrape":
