@@ -131,6 +131,9 @@ dmypy.json
 river_images
 pilot_data/
 
+# Local experiment tracking and generated state
+/wandb/
+
 # Scraper intermediate files written to the repo root by the USGS/ASOS fetch functions
 # (root-anchored so committed test fixtures under tests/ are unaffected)
 /[0-9]*.txt

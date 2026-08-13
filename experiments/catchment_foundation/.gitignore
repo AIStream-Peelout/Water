@@ -1,0 +1,9 @@
+# Track experiment source, documentation, and tests; keep generated state local.
+/runs/
+/manifests/
+/calibration/
+*.log
+checkpoint.pth
+.env
+__pycache__/
+*.py[cod]
