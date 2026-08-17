@@ -89,8 +89,9 @@ def main() -> None:
     :return: None
     :rtype: None
     """
-    from sklearn.linear_model import Ridge
-    from sklearn.model_selection import KFold
+    from sklearn.linear_model import Ridge, LogisticRegression
+    from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
+    from sklearn.neighbors import KNeighborsClassifier
 
     parser = argparse.ArgumentParser(description="Signature probes of catchment embeddings")
     parser.add_argument("--embedding-bank", required=True)
@@ -131,7 +132,24 @@ def main() -> None:
         residual = float(((predictions - target) ** 2).sum())
         variance = float(((target - target.mean()) ** 2).sum())
         probe_r2[signature] = round(1.0 - residual / max(variance, 1e-12), 3)
+    # Tercile classification (chance = 1/3): a coarser, more robust read of the same
+    # signal, with kNN alongside the linear probe to detect non-linearly-coded structure.
+    tercile_folds = StratifiedKFold(n_splits=args.n_folds, shuffle=True,
+                                    random_state=args.seed)
+    tercile_accuracy = {}
+    for signature in table.columns:
+        labels = pd.qcut(table[signature], 3, labels=False, duplicates="drop")
+        if labels.nunique() < 3:
+            continue
+        linear = cross_val_score(LogisticRegression(max_iter=2000), features, labels,
+                                 cv=tercile_folds).mean()
+        knn = cross_val_score(KNeighborsClassifier(n_neighbors=10), features, labels,
+                              cv=tercile_folds).mean()
+        tercile_accuracy[signature] = {"linear": round(float(linear), 3),
+                                       "knn": round(float(knn), 3)}
+
     report = {"n_sites": len(table), "alpha": args.alpha, "probe_r2": probe_r2,
+              "tercile_accuracy": tercile_accuracy,
               "signature_medians": {c: round(float(table[c].median()), 3)
                                     for c in table.columns}}
     table.to_csv(args.output.replace(".json", "_signatures.csv"))

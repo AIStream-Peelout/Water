@@ -150,6 +150,98 @@ def find_granule_prefix(safe_prefix: str) -> str:
     return granules[0]
 
 
+def parse_footprint(xml_text: str) -> List[Tuple[float, float]]:
+    """
+    Parses the scene footprint polygon from product metadata XML.
+
+    :param xml_text: The MTD_MSIL1C.xml contents.
+    :type xml_text: str
+    :return: The footprint vertices as (latitude, longitude) pairs, or [] when absent.
+    :rtype: List[Tuple[float, float]]
+    """
+    match = re.search(r"<EXT_POS_LIST>([\s\d.eE+-]+)</EXT_POS_LIST>", xml_text)
+    if match is None:
+        return []
+    values = [float(v) for v in match.group(1).split()]
+    pairs = list(zip(values[0::2], values[1::2]))
+    if pairs and max(abs(lat) for lat, _ in pairs) > 90.0:
+        pairs = [(lat, lon) for lon, lat in pairs]
+    return pairs
+
+
+def get_scene_metadata(safe_prefix: str) -> Dict:
+    """
+    Reads cloud coverage and the footprint polygon from the product metadata (one request).
+
+    Partial-coverage orbit-edge scenes report near-zero cloud over their sliver, so cloud
+    ranking alone favors exactly the scenes that miss the target point; the footprint lets
+    callers filter to scenes that actually cover it before paying for pixel reads.
+
+    :param safe_prefix: The SAFE prefix of the scene.
+    :type safe_prefix: str
+    :return: A dict with "cloud" (percent, NaN when absent) and "footprint" ((lat, lon) list).
+    :rtype: Dict
+    """
+    response = requests.get(GCS_HTTP_BASE + safe_prefix + "MTD_MSIL1C.xml", timeout=60)
+    response.raise_for_status()
+    match = re.search(r"<Cloud_Coverage_Assessment>([\d.]+)</Cloud_Coverage_Assessment>",
+                      response.text)
+    return {"cloud": float(match.group(1)) if match else float("nan"),
+            "footprint": parse_footprint(response.text)}
+
+
+def footprint_contains(footprint: List[Tuple[float, float]], latitude: float,
+                       longitude: float) -> bool:
+    """
+    Tests whether a point lies inside a footprint polygon (ray casting).
+
+    :param footprint: The polygon vertices as (latitude, longitude) pairs.
+    :type footprint: List[Tuple[float, float]]
+    :param latitude: The point latitude in decimal degrees.
+    :type latitude: float
+    :param longitude: The point longitude in decimal degrees.
+    :type longitude: float
+    :return: True when the point is inside the polygon.
+    :rtype: bool
+    """
+    if len(footprint) < 3:
+        return False
+    inside = False
+    for (lat1, lon1), (lat2, lon2) in zip(footprint, footprint[1:] + footprint[:1]):
+        if (lat1 > latitude) != (lat2 > latitude):
+            crossing = lon1 + (latitude - lat1) * (lon2 - lon1) / (lat2 - lat1)
+            if crossing > longitude:
+                inside = not inside
+    return inside
+
+
+def candidate_tiles(latitude: float, longitude: float) -> List[str]:
+    """
+    Lists MGRS tiles that may cover a point: its own tile plus latitude-band and UTM-zone
+    neighbors.
+
+    Near band/zone boundaries the point's canonical MGRS id may be a tile ESA never produces
+    (e.g. 18SVK over Philadelphia) or one whose scenes are orbit-edge slivers; the overlapping
+    neighbor tile then carries the real coverage.
+
+    :param latitude: The latitude in decimal degrees.
+    :type latitude: float
+    :param longitude: The longitude in decimal degrees.
+    :type longitude: float
+    :return: Deduplicated candidate tile ids, the point's own tile first.
+    :rtype: List[str]
+    """
+    tiles: List[str] = []
+    for dlat, dlon in ((0.0, 0.0), (0.45, 0.0), (-0.45, 0.0), (0.0, 0.6), (0.0, -0.6)):
+        try:
+            tile = latlon_to_mgrs_tile(latitude + dlat, longitude + dlon)
+        except Exception:  # noqa: BLE001 - a nudged point may fall outside MGRS coverage
+            continue
+        if tile not in tiles:
+            tiles.append(tile)
+    return tiles
+
+
 def get_cloud_cover(safe_prefix: str) -> float:
     """
     Reads the scene-level cloud coverage percentage from the product metadata XML.

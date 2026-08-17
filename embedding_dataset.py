@@ -32,7 +32,8 @@ import pandas as pd
 import requests
 
 from gages2_functions import DEFAULT_TABLES, download_gages2, gauge_in_gages2, load_gages2_table
-from sentinel_functions import extract_patch, get_cloud_cover, latlon_to_mgrs_tile, list_sentinel_safes
+from sentinel_functions import (candidate_tiles, extract_patch, footprint_contains,
+                                get_scene_metadata, list_sentinel_safes)
 from state_scrape import list_state_gauges
 
 DAILY_VALUES_URL = ("https://waterservices.usgs.gov/nwis/dv/?format=json&sites={}&parameterCd=00060"
@@ -126,20 +127,36 @@ def collect_gauge_record(site_number: str, latitude: float, longitude: float,
         return {"site_no": site_number, "status": "short_history",
                 "history_days": int(flow["cfs"].notna().sum())}
 
-    scenes = list_sentinel_safes(latlon_to_mgrs_tile(latitude, longitude), scene_window[0],
-                                 scene_window[1])
-    if scenes.empty:
-        return {"site_no": site_number, "status": "no_sentinel_scenes"}
-    scenes = scenes.assign(cloud=scenes["safe_prefix"].map(get_cloud_cover)).sort_values("cloud")
-    patch = None
-    for _, scene in scenes.head(3).iterrows():
-        candidate = extract_patch(scene["safe_prefix"], latitude, longitude, bands=bands,
-                                  patch_size=patch_size)
-        if (candidate > 0).any(axis=0).mean() > 0.5:
-            patch, chosen = candidate, scene
+    # Scene choice: only scenes whose footprint contains the gauge are ranked by cloud —
+    # orbit-edge slivers report ~0% cloud over their sliver, so cloud alone selects misses.
+    # Neighbor tiles matter near UTM-zone/latitude-band boundaries (see candidate_tiles).
+    patch, any_scene, any_covering = None, False, False
+    for tile in candidate_tiles(latitude, longitude):
+        scenes = list_sentinel_safes(tile, scene_window[0], scene_window[1])
+        if scenes.empty:
+            continue
+        any_scene = True
+        metadata = [get_scene_metadata(prefix) for prefix in scenes["safe_prefix"]]
+        scenes = scenes.assign(
+            cloud=[m["cloud"] for m in metadata],
+            covers=[footprint_contains(m["footprint"], latitude, longitude)
+                    for m in metadata])
+        covering = scenes[scenes["covers"]].sort_values("cloud")
+        if covering.empty:
+            continue
+        any_covering = True
+        for _, scene in covering.head(5).iterrows():
+            candidate = extract_patch(scene["safe_prefix"], latitude, longitude, bands=bands,
+                                      patch_size=patch_size)
+            if (candidate > 0).any(axis=0).mean() > 0.5:
+                patch, chosen = candidate, scene
+                break
+        if patch is not None:
             break
     if patch is None:
-        return {"site_no": site_number, "status": "no_valid_patch"}
+        status = "no_valid_patch" if any_covering else \
+            ("no_covering_scene" if any_scene else "no_sentinel_scenes")
+        return {"site_no": site_number, "status": status}
 
     dates = pd.to_datetime(flow["date"])
     full_index = pd.date_range(history_start, history_end, freq="D")
@@ -152,7 +169,8 @@ def collect_gauge_record(site_number: str, latitude: float, longitude: float,
         history_start=str(full_index[0].date()),
         static=static_row, static_names=np.array(static_matrix.columns, dtype=str))
     return {"site_no": site_number, "status": "ok", "cloud": float(chosen["cloud"]),
-            "scene": chosen["product_id"], "history_days": int(flow["cfs"].notna().sum())}
+            "scene": chosen["product_id"], "tile": chosen["tile"],
+            "history_days": int(flow["cfs"].notna().sum())}
 
 
 def run_state_collection(state_abbrev: str, output_root: str = os.path.join("pilot_data",

@@ -18,7 +18,7 @@ from typing import List
 import pandas as pd
 import torch
 
-sys.path.insert(0, "/Users/isaac/Documents/GitHub/flow-forecast")
+sys.path.insert(0, os.environ.get("FF_REPO", "/Users/isaac/Documents/GitHub/flow-forecast"))
 
 
 def build_combined_dir(state_dirs: List[str], combined_dir: str) -> int:
@@ -120,7 +120,11 @@ def main() -> None:
                                        "epochs": args.epochs, "batch_size": args.batch_size,
                                        "lr": args.lr, "fusions": args.fusions})
 
-    summary = {"states": args.states, "n_records": n_records}
+    summary = {"states": args.states, "n_records": n_records,
+               "config": {"epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
+                          "device": args.device, "history_mode": args.history_mode,
+                          "cross_year": args.cross_year, "blocked_batches": args.blocked_batches,
+                          "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                             history_mode=args.history_mode,
