@@ -107,3 +107,82 @@ Ops notes: FF panel-mode backbone lives on branch `foundation_model_hydro`, chec
 `/Users/isaac/Documents/GitHub/ff-foundation` (worktree; main FF checkout stays on the MPS
 branch). `train_catchment_embeddings.py` honors `FF_REPO` to point at it. Embedding training
 runs use `--no-wandb` when unattended (no netrc login on this machine; wandb.init would hang).
+
+## 6. v5 fleet retrain (555 sites, 5 states) — 2026-08-14/18
+
+Recipe unchanged (300 ep, concat, cross-year, blocked, pre-2022 panels), seeds 42/43/44 at
+batch 64 plus one batch-128 run. Artifacts: `pilot_data/embedding_dataset_hourly_pre2022/
+FLEET_v5_{s42,s43,s44,b128_s42}/`. Probe JSONs `calibration/signature_probe_FLEET_v5_*.json`
+(`*_coutsubset.json` = same bank probed on the 206 CO/UT sites only).
+
+Signature R² (shipped `embeddings_concat.pt` banks):
+
+| probe set                    | bank                | size  | flash | melt  | BFI   |
+|------------------------------|---------------------|-------|-------|-------|-------|
+| 555 fleet sites              | v5 b64, 3-seed mean | 0.276 | 0.278 | 0.231 | 0.140 |
+| 555 fleet sites              | v5 b128 s42         | 0.364 | 0.366 | 0.270 | 0.174 |
+| **same 206 CO/UT sites**     | v4c COUT-trained, 3-seed mean | 0.169 | 0.179 | 0.215 | 0.051 |
+| **same 206 CO/UT sites**     | v5 b64, 3-seed mean | 0.224 | 0.152 | 0.174 | 0.050 |
+| **same 206 CO/UT sites**     | v5 b128 s42         | 0.259 | 0.199 | 0.156 | 0.077 |
+
+**Fleet training did not sharpen the representation of a given basin.** The higher fleet-wide
+numbers are between-state signature variance (FL vs CO is trivially separable); on identical
+CO/UT sites v5 ≈ v4c (size up, flashiness/melt slightly down). Batch 128 helps modestly and
+consistently (single seed). Signature definitions were hardened for the fleet (clip negative
+tidal cfs; log-ratio floor at 1% of mean) — all baselines re-probed under the same definitions.
+
+## 7. Modality attribution: what actually forms the representation
+
+`embedding_modality_analysis.py` (new). Verified first: **the fused `projection` MLP is
+untrained** — bit-identical to its seed-42 init after training (max |Δ| = 0.0), because
+InfoNCE only ever touches the per-modality contrastive heads. Every bank v0–v5 is a random
+LayerNorm→Linear→GELU→Linear map of `[vision_pooled | tabular_pooled | history_pooled]`.
+
+Consistent across v4c seeds and v5 (206 and 555 sites):
+
+- **Variance share of the concat**: vision 0.88–0.91, history 0.09–0.12, tabular 0.005–0.011.
+- **Knockout of the fused bank** (mean-fill one tower): vision → cosine 0.44–0.57 to the
+  original, self-retrieval 11–27%; history → 0.94–0.96, 100%; tabular → 0.997, 100%.
+  The shipped bank ≈ the vision embedding plus a small history perturbation; statics are
+  effectively absent.
+- **Cross-modal retrieval (what the loss optimizes)**: 0.94–0.998 top-1 among 206/555 sites
+  (chance 0.5%/0.2%), incl. history↔other-year history 0.97–0.99. The objective is saturated
+  as site identification (loss 0.05–0.06); regime content is a by-product, which is why more
+  sites (v5) add easy negatives rather than learning pressure.
+- **Extraction distribution shift**: with `--cross-year`, training views are seasonal-only
+  (4 members) but canonical extraction feeds 6 members incl. flood/drought flags never seen in
+  training. On the canonical view history-involving retrieval drops to 0.53–0.80; on the
+  seasonal-only view it is 0.97–0.99. `--seasonal-only` extraction is the correct one.
+- **Where the regime signal lives** (per-tower probes, seasonal-only view):
+
+| bank (v4c s42, 206 CO/UT)     | size  | flash | melt  | BFI   |
+|-------------------------------|-------|-------|-------|-------|
+| shipped random projection     | 0.148 | 0.212 | 0.185 | 0.059 |
+| pooled_concat_l2 (equal wt)   | 0.218 | 0.337 | 0.346 | 0.115 |
+| history tower only            | 0.130 | 0.387 | 0.408 | 0.135 |
+| tabular tower only            | 0.242 | 0.177 | 0.234 | 0.054 |
+| vision tower only             | 0.184 | 0.244 | 0.206 | 0.071 |
+
+| bank (v5 b128, 555 fleet)     | size  | flash | melt  | BFI   |
+|-------------------------------|-------|-------|-------|-------|
+| shipped random projection     | 0.365 | 0.384 | 0.307 | 0.179 |
+| pooled_concat_l2 (equal wt)   | 0.502 | 0.542 | 0.522 | 0.276 |
+| history tower only            | 0.353 | 0.565 | 0.501 | 0.245 |
+| tabular tower only            | 0.534 | 0.383 | 0.467 | 0.265 |
+| vision tower only             | 0.424 | 0.398 | 0.317 | 0.189 |
+
+The history tower carries the regime signal (flashiness/melt/BFI), the tabular tower carries
+size (and melt at fleet scale); vision is weakest on regime yet ~9:1 dominant in the bank.
+The random fusion under-weights exactly the towers that matter. Alternative banks are saved
+per version dir as `embeddings_{pooled_concat_l2,contrastive_concat,pooled_history}_seasonal.pt`.
+
+**Free win, no retraining**: define the bank as the L2-normalized equal-weight concat of the
+trained tower outputs, extracted seasonal-only. Same-206-site lift for v4c: melt 0.185→0.346,
+flashiness 0.212→0.337, BFI 0.06→0.115, size 0.15→0.22. Fleet (v5 b128): melt 0.31→0.52,
+flashiness 0.38→0.54, size 0.37→0.50, BFI 0.18→0.28.
+
+**Model-side implications (would touch the FF backbone)**: (1) train the fusion — add an
+InfoNCE term on the fused embedding between the two cross-year views, or drop `projection` and
+make the bank the normalized concat; (2) balance tower magnitudes (per-tower normalization
+before concat); (3) the identity objective is saturated — regime encoding needs harder
+positives (multi-scene/season Sentinel views, augmentations) or a non-identity signal.

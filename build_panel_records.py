@@ -35,6 +35,9 @@ def load_hourly_flow(csv_path: str, end_date: Optional[str] = None) -> pd.Series
     :return: An hourly cfs series with NaNs for missing hours.
     :rtype: pd.Series
     """
+    if "cfs" not in pd.read_csv(csv_path, nrows=0).columns:
+        # Stage-only gauges (height without discharge) cannot supply a flow panel.
+        return pd.Series(dtype=np.float32)
     frame = pd.read_csv(csv_path, usecols=["datetime", "cfs"], parse_dates=["datetime"])
     frame = frame.set_index("datetime").sort_index()
     if frame.index.tz is not None:
@@ -81,7 +84,7 @@ def select_panel(flow: pd.Series, min_coverage: float = 0.5,
     :rtype: List[Tuple[str, pd.Timestamp]], optional
     """
     valid = flow.dropna()
-    if len(valid) < 3 * 8760:
+    if len(valid) < 3 * 8760 or not isinstance(flow.index, pd.DatetimeIndex):
         return None
     observed = flow.notna().astype(np.float32)
     coverage = observed.rolling(SLICE_HOURS).mean()
