@@ -137,7 +137,6 @@ def main() -> None:
                           "train_fusion": not args.no_train_fusion,
                           "fusion_dropout": args.fusion_dropout,
                           "fusion_head": args.fusion_head,
-                          "regional_vision": "image_regional" in dataset[0],
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
@@ -151,6 +150,7 @@ def main() -> None:
         if "image_regional" in sample:
             regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
                         "regional_channels": sample["image_regional"].shape[0]}
+        summary["config"]["regional_vision"] = bool(regional)
         encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                    image_channels=sample["image"].shape[0],
                                    static_features=dataset.static_features,
