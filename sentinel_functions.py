@@ -31,13 +31,45 @@ BAND_RESOLUTION_M = {
     "B08": 10, "B8A": 20, "B09": 60, "B10": 60, "B11": 20, "B12": 20, "TCI": 10,
 }
 
-# GDAL settings that keep /vsicurl/ JP2 access to targeted range requests.
+# GDAL settings that keep /vsicurl/ JP2 access to targeted range requests, with retries so a
+# transient GCS hiccup does not abort a multi-hour collection.
 RASTERIO_GCS_ENV = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".jp2",
     "GDAL_INGESTED_BYTES_AT_OPEN": "200000",
     "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
+    "GDAL_HTTP_MAX_RETRY": "4",
+    "GDAL_HTTP_RETRY_DELAY": "3",
 }
+
+
+def gcs_get(url: str, params: Optional[Dict] = None, timeout: int = 60,
+            attempts: int = 4) -> requests.Response:
+    """
+    GETs a public GCS URL with retries on transient connection/5xx failures.
+
+    :param url: The URL to fetch.
+    :type url: str
+    :param params: Optional query parameters.
+    :type params: Dict, optional
+    :param timeout: Per-attempt timeout in seconds, defaults to 60.
+    :type timeout: int, optional
+    :param attempts: Maximum attempts, defaults to 4 (backoff 2, 4, 8 s).
+    :type attempts: int, optional
+    :return: The response (4xx responses are returned, not retried).
+    :rtype: requests.Response
+    """
+    import time
+    for attempt in range(attempts):
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            if response.status_code < 500:
+                return response
+        except requests.RequestException:
+            if attempt == attempts - 1:
+                raise
+        time.sleep(2 ** (attempt + 1))
+    return response
 
 PRODUCT_ID_PATTERN = re.compile(
     r"(?P<satellite>S2[ABC])_MSIL1C_(?P<sensing>\d{8}T\d{6})_N\d{4}_R(?P<orbit>\d{3})_T(?P<tile>[0-9A-Z]{5})_\d{8}T\d{6}")
@@ -73,7 +105,7 @@ def list_gcs_prefixes(prefix: str) -> List[str]:
         params = {"prefix": prefix, "delimiter": "/"}
         if page_token:
             params["pageToken"] = page_token
-        response = requests.get(GCS_LIST_URL, params=params, timeout=60)
+        response = gcs_get(GCS_LIST_URL, params=params)
         response.raise_for_status()
         payload = response.json()
         prefixes.extend(payload.get("prefixes", []))
@@ -182,7 +214,7 @@ def get_scene_metadata(safe_prefix: str) -> Dict:
     :return: A dict with "cloud" (percent, NaN when absent) and "footprint" ((lat, lon) list).
     :rtype: Dict
     """
-    response = requests.get(GCS_HTTP_BASE + safe_prefix + "MTD_MSIL1C.xml", timeout=60)
+    response = gcs_get(GCS_HTTP_BASE + safe_prefix + "MTD_MSIL1C.xml")
     if response.status_code == 404:
         # A few listed SAFE prefixes carry no product metadata (incomplete uploads); treat
         # them as unusable rather than aborting the whole gauge.
