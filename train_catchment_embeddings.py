@@ -104,9 +104,12 @@ def main() -> None:
                              "fusion suppress history)")
     parser.add_argument("--no-train-fusion", action="store_true",
                         help="Ablation: leave the fusion untrained (pre-#916 behavior)")
-    parser.add_argument("--fusion-head", default="mlp", choices=["mlp", "linear"],
-                        help="Map from fused tower features to the bank: the default MLP, or "
-                             "a linear head that keeps tower structure linearly readable")
+    parser.add_argument("--fusion-head", default="linear", choices=["mlp", "linear"],
+                        help="Map from fused tower features to the bank: a linear head (default; "
+                             "keeps tower structure linearly readable) or the older MLP")
+    parser.add_argument("--no-regional", action="store_true",
+                        help="Ignore regional-context patches in the records (control run "
+                             "without the vision_regional tower)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -147,7 +150,7 @@ def main() -> None:
         # Records carrying a regional-context patch (see embedding_dataset.py --regional) get a
         # fourth tower; the loader also serves its other-season view as a cross-season positive.
         regional = {}
-        if "image_regional" in sample:
+        if "image_regional" in sample and not args.no_regional:
             regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
                         "regional_channels": sample["image_regional"].shape[0]}
         summary["config"]["regional_vision"] = bool(regional)

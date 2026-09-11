@@ -319,3 +319,17 @@ Code (all committed):
 Runs: regional collection launched for all 5 states (8 shards, scene year 2025, overnight);
 CO/UT A/B `COUT_v7b_linear_s{42,43,44}` (linear head) vs `COUT_v7a_d05_*` (MLP head).
 v8 = regional tower + winning head + batch 128, 3 seeds, once sidecars are merged.
+
+### 9a. Linear vs MLP fusion head (2026-09-11): linear adopted
+
+Same 206 CO/UT sites, 3 seeds each, fused bank R²: MLP head (`COUT_v7a_d05_*`) size 0.262 /
+flash 0.236 / melt 0.336 / BFI 0.079; **linear head** (`COUT_v7b_linear_*`) 0.265 / 0.261 /
+0.368 / 0.067. Seed-42 attribution: the linear fused bank matches its own L2 tower concat
+(0.256/0.287/0.327/0.088 vs 0.247/0.294/0.332/0.093) where the MLP bank trailed it
+(melt 0.335 vs 0.388) — the fusion is no longer a lossy compression for linear readout.
+`fusion_head="linear"` is now the CatchmentEncoder default (PR #918) and the Water CLI
+default; `--fusion-head mlp` keeps the old head.
+
+Regional collection: 8 shards, 0 errors in the first ~60 gauges, ~3.5 min/gauge/shard.
+`run_v8_when_collected.sh` waits for the shards, merges sidecars, trains v8 (regional) vs
+v8ctl (`--no-regional`), linear head, batch 128, 3 seeds each, and evaluates both vs v7.
