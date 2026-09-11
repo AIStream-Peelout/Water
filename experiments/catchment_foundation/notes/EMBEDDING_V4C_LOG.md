@@ -186,3 +186,109 @@ InfoNCE term on the fused embedding between the two cross-year views, or drop `p
 make the bank the normalized concat; (2) balance tower magnitudes (per-tower normalization
 before concat); (3) the identity objective is saturated — regime encoding needs harder
 positives (multi-scene/season Sentinel views, augmentations) or a non-identity signal.
+
+## 8. Training the fusion — FF PR #916 (2026-09-03)
+
+Decision: the untrained fusion is a defect, not a design choice. Fixed in flow-forecast on
+branch `fusion-contrastive-training` (PR https://github.com/AIStream-Peelout/flow-forecast/pull/916,
+base `foundation_model_hydro`; the ff-foundation worktree now tracks this branch):
+
+- `contrastive_step(train_fusion=True)`: InfoNCE on the fused embedding through a new
+  `fused_head` — fused(base views) vs fused(cross-year views substituted), so `projection`
+  (and `cross_attention`) are in the loss graph. Without alias views the fused projection is
+  paired with each modality projection instead. `train_fusion=False` = old behavior (ablation).
+- `MultiModalEncoder.normalize_towers` (CatchmentEncoder default True): L2-normalize pooled
+  towers before fusion, removing the 88/11/1 magnitude imbalance at the source.
+- `CatchmentEmbeddingDataset(seasonal_only=True)`: extraction view = training view for
+  cross-year encoders. `train_catchment_embeddings.py` now extracts seasonal-only whenever
+  `--cross-year` is set (recorded in `training_summary.json` config).
+- Regression test `tests/test_contrastive_fusion.py`: every named parameter receives a
+  non-zero gradient through the training step for both fusion modes (8 tests; 33 existing
+  tests for the touched modules still pass).
+
+Live verification on the Water pipeline (5-epoch CO/UT smoke): `projection` weights moved by
+4.2e-3 vs init — same order as the towers — where every previous checkpoint showed 0.0.
+Pre-PR checkpoints (v4c, v5) lack `fused_head`; `embedding_modality_analysis.py` detects this
+and loads them with `strict=False`, `normalize_towers=False`.
+
+v6 = v5 protocol (555 sites, 300 ep, seeds 42/43/44 at batch 64 + one batch-128) on the
+fused-training code with seasonal extraction. Results appended below when complete.
+
+### 8a. v6 results (2026-09-08): the fusion trains, but the fused objective had a shortcut
+
+v6 (`FLEET_v6_{s42,s43,s44,b128_s42}`, fused training + normalized towers + seasonal
+extraction; loss 3.8 → 0.04–0.06, b128 0.16). Shipped-bank probe R²:
+
+| probe set              | bank                | size  | flash | melt  | BFI   |
+|------------------------|---------------------|-------|-------|-------|-------|
+| 555 fleet sites        | v5 b64 3-seed mean  | 0.276 | 0.278 | 0.231 | 0.140 |
+| 555 fleet sites        | v6 b64 3-seed mean  | 0.314 | 0.281 | 0.176 | 0.191 |
+| 555 fleet sites        | v6 b128 s42         | 0.357 | 0.330 | 0.206 | 0.173 |
+| same 206 CO/UT sites   | v5 b64 3-seed mean  | 0.224 | 0.152 | 0.174 | 0.050 |
+| same 206 CO/UT sites   | v6 b64 3-seed mean  | 0.221 | 0.142 | 0.148 | 0.054 |
+
+Mixed: size/BFI up fleet-wide, melt down, CO/UT subset flat. Corrected attribution (the
+analysis script now uses the encoder's own `pool_towers`/`fuse`, so it describes the shipped
+bank): variance share is balanced (0.35/0.33/0.33 — `normalize_towers` works), the
+projection is trained, yet the fused bank is **least sensitive to history**: mean-fill
+knockout cosine vision 0.77 / tabular 0.79 / history 0.91, and self-retrieval stays 100% with
+history removed. Meanwhile the v6 history tower alone probes flashiness 0.48–0.51 and melt
+0.38–0.48, and the equal-weight tower concat 0.43/0.35–0.43 — both far above the fused bank.
+
+Mechanism: the fused InfoNCE pair was fused(base views) vs fused(cross-year views). A site
+has one image and one static vector, so vision and tabular are *identical* across the two
+views and only history differs — the projection is rewarded for matching on the shared
+blocks and treating history as nuisance. Training the fusion was necessary but the pair
+construction handed it a shortcut.
+
+Fix (same PR branch): per-sample **modality dropout** on both fused views
+(`drop_modalities`, default p=0.5, at least one modality kept) so no block is guaranteed
+shared, plus fused↔each-tower InfoNCE pairs so the fused code must stay predictive of every
+modality's identity code even when that modality is dropped from its own view. Water CLI:
+`--fusion-dropout` (default 0.5) and `--no-train-fusion` (ablation). CO/UT A/B (dropout 0.5
+vs 0, 3 seeds each, `COUT_v7a_d05_*` / `COUT_v7a_d0_*`) decides before any fleet run.
+
+### 8b. A/B result (2026-09-08): trained fusion + modality dropout wins on the same sites
+
+Same 206 CO/UT sites, shipped fused bank, 3-seed means (`COUT_v7a_d0_*`, `COUT_v7a_d05_*`):
+
+| variant                                   | size  | flash | melt  | BFI   | cv    | diurnal |
+|-------------------------------------------|-------|-------|-------|-------|-------|---------|
+| v4c untrained fusion (random projection)  | 0.169 | 0.179 | 0.215 | 0.051 | 0.071 | 0.097   |
+| v7a d0: trained fusion, fused↔tower pairs | 0.192 | 0.191 | 0.302 | 0.054 | 0.090 | 0.137   |
+| **v7a d05: + modality dropout 0.5**       | 0.262 | 0.236 | 0.336 | 0.079 | 0.100 | 0.171   |
+
+Every d05 seed beats every v4c seed on size and melt (d05 melt 0.318–0.354; v4c 0.185–0.245).
+Attribution (d05 s42): knockout cosine vision 0.947 / tabular 0.937 / history 0.959, variance
+share 0.34/0.34/0.32 — the fused bank uses all three towers. Remaining headroom: the fused
+code still trails the best single tower on some signatures (d05 history tower alone: melt
+0.426, flashiness 0.312; L2 concat 0.388/0.266), i.e. the identity objective is now the
+ceiling, not the fusion. Fix committed to PR #916 (`fusion_modality_dropout=0.5` default,
+fused↔tower pairs always on). Fleet run v7 = v5 protocol on this objective.
+
+### 8c. v7 fleet (2026-09-08): fixed objective at 555 sites
+
+`FLEET_v7_{s42,s43,s44,b128_s42}` = v5 protocol on the modality-dropout objective. Shipped
+fused bank, probe R²:
+
+| probe set              | bank                  | size  | flash | melt  | BFI   |
+|------------------------|-----------------------|-------|-------|-------|-------|
+| 555 fleet sites        | v6 b64 3-seed mean    | 0.314 | 0.281 | 0.176 | 0.191 |
+| 555 fleet sites        | v7 b64 3-seed mean    | 0.312 | 0.266 | 0.128 | 0.165 |
+| 555 fleet sites        | v7 b128 s42           | 0.369 | 0.394 | 0.170 | 0.211 |
+| same 206 CO/UT sites   | v4c (COUT, untrained fusion) | 0.169 | 0.179 | 0.215 | 0.051 |
+| same 206 CO/UT sites   | v6 b64 3-seed mean    | 0.221 | 0.142 | 0.148 | 0.054 |
+| same 206 CO/UT sites   | **v7 b64 3-seed mean**| 0.318 | 0.201 | 0.227 | 0.090 |
+| same 206 CO/UT sites   | v7 b128 s42           | 0.325 | 0.238 | 0.310 | 0.096 |
+
+On the like-for-like CO/UT test v7 is the best fleet-trained bank so far (vs v6: size +0.10,
+flash +0.06, melt +0.08, BFI +0.04) and beats the untrained-fusion baseline on size/melt/BFI.
+Fleet-wide the b64 numbers are flat-to-lower than v6 (melt 0.176 → 0.128) while b128 is the
+best fleet bank on size/flash/BFI — batch size matters more under the harder objective.
+
+Standing gap: the 256-d fused code still reads regime worse than the SAME encoder's 384-d
+L2 tower concat (fleet v7 s42: melt 0.126 vs 0.353, flash 0.271 vs 0.405; knockout is
+balanced 0.95/0.95/0.97). The MLP fusion (LayerNorm→Linear→GELU→Linear) trained for identity
+scrambles linearly-readable structure the towers carry. Candidate fix: a linear fusion
+(LayerNorm→Linear, optionally residual to the concat) or shipping the L2 tower concat as the
+bank while keeping the fused head as a training signal — decide by a CO/UT A/B (3 min/run).

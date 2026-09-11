@@ -183,6 +183,10 @@ def get_scene_metadata(safe_prefix: str) -> Dict:
     :rtype: Dict
     """
     response = requests.get(GCS_HTTP_BASE + safe_prefix + "MTD_MSIL1C.xml", timeout=60)
+    if response.status_code == 404:
+        # A few listed SAFE prefixes carry no product metadata (incomplete uploads); treat
+        # them as unusable rather than aborting the whole gauge.
+        return {"cloud": float("nan"), "footprint": []}
     response.raise_for_status()
     match = re.search(r"<Cloud_Coverage_Assessment>([\d.]+)</Cloud_Coverage_Assessment>",
                       response.text)
@@ -239,7 +243,44 @@ def candidate_tiles(latitude: float, longitude: float) -> List[str]:
             continue
         if tile not in tiles:
             tiles.append(tile)
+    # Closest tile center first: a point near its own tile's edge sits deep inside the
+    # overlapping neighbor, whose scenes cover a wide window around it completely.
+    try:
+        tiles.sort(key=lambda t: _degrees_from(tile_center(t), latitude, longitude))
+    except Exception:  # noqa: BLE001 - keep insertion order if a center cannot be resolved
+        pass
     return tiles
+
+
+def tile_center(tile: str) -> Tuple[float, float]:
+    """
+    Approximates the (latitude, longitude) of an MGRS 100 km square's center.
+
+    :param tile: The 5-character MGRS tile id, e.g. "13TDE".
+    :type tile: str
+    :return: (latitude, longitude) of the square's center.
+    :rtype: Tuple[float, float]
+    """
+    import mgrs
+    latitude, longitude = mgrs.MGRS().toLatLon(tile + "5000050000")
+    return float(latitude), float(longitude)
+
+
+def _degrees_from(center: Tuple[float, float], latitude: float, longitude: float) -> float:
+    """
+    Squared angular distance (cos-latitude scaled) between a tile center and a point.
+
+    :param center: (latitude, longitude) of the tile center.
+    :type center: Tuple[float, float]
+    :param latitude: The point latitude.
+    :type latitude: float
+    :param longitude: The point longitude.
+    :type longitude: float
+    :return: The squared distance in scaled degrees.
+    :rtype: float
+    """
+    dlon = (center[1] - longitude) * np.cos(np.radians(latitude))
+    return float((center[0] - latitude) ** 2 + dlon ** 2)
 
 
 def get_cloud_cover(safe_prefix: str) -> float:
@@ -261,12 +302,16 @@ def get_cloud_cover(safe_prefix: str) -> float:
 
 def extract_patch(safe_prefix: str, latitude: float, longitude: float,
                   bands: Tuple[str, ...] = ("B02", "B03", "B04", "B08"), patch_size: int = 128,
-                  granule_prefix: Optional[str] = None) -> np.ndarray:
+                  granule_prefix: Optional[str] = None, pixel_meters: float = 10.0,
+                  resampling: str = "nearest") -> np.ndarray:
     """
     Streams a multi-band patch centered on a point out of a cloud-hosted scene.
 
-    All bands are resampled onto the 10 m grid of the patch, so the output is aligned across bands
-    regardless of their native resolution. Pixels outside the scene footprint are zero.
+    All bands are resampled onto a common ``pixel_meters`` grid, so the output is aligned across
+    bands regardless of their native resolution. Pixels outside the scene footprint are zero.
+    The default (10 m, nearest) reads the native 10 m grid; a coarser ``pixel_meters`` with
+    ``resampling="average"`` reads a regional-context patch (e.g. 512 px at 50 m = 25.6 km),
+    decoded at a reduced JPEG2000 resolution level so the cost stays close to a native read.
 
     :param safe_prefix: The SAFE prefix of the scene.
     :type safe_prefix: str
@@ -276,10 +321,16 @@ def extract_patch(safe_prefix: str, latitude: float, longitude: float,
     :type longitude: float
     :param bands: The band names to read, defaults to the 10 m bands ("B02", "B03", "B04", "B08").
     :type bands: Tuple[str, ...], optional
-    :param patch_size: The patch width/height in 10 m pixels (128 -> 1.28 km square), defaults to 128.
+    :param patch_size: The patch width/height in output pixels (128 at 10 m -> 1.28 km square),
+        defaults to 128.
     :type patch_size: int, optional
     :param granule_prefix: The granule prefix if already discovered, defaults to None which lists it.
     :type granule_prefix: str, optional
+    :param pixel_meters: Ground size of one output pixel in meters, defaults to 10.0.
+    :type pixel_meters: float, optional
+    :param resampling: rasterio resampling method name ("nearest", "average", "bilinear"),
+        defaults to "nearest".
+    :type resampling: str, optional
     :return: A float32 array of shape (len(bands), patch_size, patch_size).
     :rtype: np.ndarray
     """
@@ -295,6 +346,7 @@ def extract_patch(safe_prefix: str, latitude: float, longitude: float,
     # sensing time from the product id, not the granule discriminator.
     product_sensing = re.search(r"MSIL1C_(\d{8}T\d{6})", safe_prefix).group(1)
     tile_id = granule_name.split("_")[1]
+    method = getattr(Resampling, resampling)
     patch = np.zeros((len(bands), patch_size, patch_size), dtype=np.float32)
     with rasterio.Env(**RASTERIO_GCS_ENV):
         for i, band in enumerate(bands):
@@ -304,12 +356,12 @@ def extract_patch(safe_prefix: str, latitude: float, longitude: float,
             with rasterio.open(url) as src:
                 xs, ys = warp_transform("EPSG:4326", src.crs, [longitude], [latitude])
                 row, col = src.index(xs[0], ys[0])
-                native_size = patch_size * 10 // resolution
+                native_size = int(round(patch_size * pixel_meters / resolution))
                 window = Window(col - native_size // 2, row - native_size // 2,
                                 native_size, native_size)
                 patch[i] = src.read(1, window=window, boundless=True, fill_value=0,
                                     out_shape=(patch_size, patch_size),
-                                    resampling=Resampling.nearest).astype(np.float32)
+                                    resampling=method).astype(np.float32)
     return patch
 
 

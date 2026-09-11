@@ -93,17 +93,17 @@ def encode_towers(encoder, dataset, device: str, batch_size: int = 32,
         inputs = {name: batch[key].to(device) for name, key in INPUT_KEYS.items()}
         if seasonal_only:
             inputs["history"] = seasonal_members(inputs["history"])
-        outputs = {name: tower(inputs[name]) for name, tower in encoder.encoders.items()}
-        pooled = {name: out.mean(dim=1) if out.dim() == 3 else out
-                  for name, out in outputs.items()}
-        fused = torch.cat([pooled[name] for name in encoder.encoders], dim=-1)
-        parts = {"embedding": encoder.projection(fused)}
+        # Use the encoder's own tower/pool/fuse path so pooled blocks carry the encoder's
+        # normalization and "embedding" is exactly the shipped bank.
+        outputs = encoder.encode_towers(inputs)
+        pooled = encoder.pool_towers(outputs)
+        parts = {"embedding": encoder.fuse(outputs)}
         for name in MODALITIES:
             parts["pooled_" + name] = pooled[name]
             parts["proj_" + name] = encoder.contrastive_heads[name](pooled[name])
         if alt_iter is not None:
             alt = encoder.encoders["history"](next(alt_iter)["history_alt"].to(device))
-            alt = alt.mean(dim=1) if alt.dim() == 3 else alt
+            alt = encoder.pool_towers({"history": alt})["history"]
             parts["proj_history_alt"] = encoder.contrastive_heads["history"](alt)
         for key, value in parts.items():
             collected.setdefault(key, []).append(value.detach().cpu())
@@ -220,15 +220,19 @@ def main() -> None:
     alt_dataset = CatchmentEmbeddingDataset(records, seed=args.seed,
                                             history_mode="hourly_panel", cross_year_views=True)
     sample = dataset[0]
+    state = torch.load(os.path.join(args.version_dir, "encoder_%s.pt" % args.fusion),
+                       map_location="cpu")
+    # Checkpoints from before the fusion was trained have no fused_head and were trained
+    # without tower normalization; reproduce their training-time encode exactly.
+    trained_fusion = "fused_head.weight" in state
     encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                image_channels=sample["image"].shape[0],
                                static_features=dataset.static_features,
                                history_features=sample["history"].shape[-1],
                                history_len=sample["history"].shape[-2],
-                               history_mode="panel", fusion=args.fusion)
-    encoder.load_state_dict(torch.load(os.path.join(args.version_dir,
-                                                    "encoder_%s.pt" % args.fusion),
-                                       map_location="cpu"))
+                               history_mode="panel", fusion=args.fusion,
+                               normalize_towers=trained_fusion)
+    encoder.load_state_dict(state, strict=trained_fusion)
     encoder = encoder.to(args.device).eval()
 
     features = encode_towers(encoder, dataset, args.device, seasonal_only=args.seasonal_only,
@@ -254,7 +258,7 @@ def main() -> None:
 
     # Alternative banks built from the trained parts of the network.
     normalized = [torch.nn.functional.normalize(pooled[m], dim=-1) for m in MODALITIES]
-    banks = {"random_projection": features["embedding"],
+    banks = {"fused_bank": features["embedding"],
              "pooled_concat_l2": torch.cat(normalized, dim=-1),
              "contrastive_concat": torch.cat(
                  [torch.nn.functional.normalize(features["proj_" + m], dim=-1)

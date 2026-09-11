@@ -98,6 +98,12 @@ def main() -> None:
                              "(hourly_panel only)")
     parser.add_argument("--blocked-batches", action="store_true",
                         help="Batch site-number-adjacent gauges together (harder negatives)")
+    parser.add_argument("--fusion-dropout", type=float, default=0.5,
+                        help="Per-sample modality dropout on the fused contrastive views "
+                             "(0 = fused views share image/static blocks, which lets the "
+                             "fusion suppress history)")
+    parser.add_argument("--no-train-fusion", action="store_true",
+                        help="Ablation: leave the fusion untrained (pre-#916 behavior)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -124,6 +130,10 @@ def main() -> None:
                "config": {"epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
                           "device": args.device, "history_mode": args.history_mode,
                           "cross_year": args.cross_year, "blocked_batches": args.blocked_batches,
+                          "seasonal_extraction": args.cross_year,
+                          "train_fusion": not args.no_train_fusion,
+                          "fusion_dropout": args.fusion_dropout,
+                          "regional_vision": "image_regional" in dataset[0],
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
@@ -131,23 +141,34 @@ def main() -> None:
                                             cross_year_views=args.cross_year)
         sample = dataset[0]
         panel = args.history_mode == "hourly_panel"
+        # Records carrying a regional-context patch (see embedding_dataset.py --regional) get a
+        # fourth tower; the loader also serves its other-season view as a cross-season positive.
+        regional = {}
+        if "image_regional" in sample:
+            regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
+                        "regional_channels": sample["image_regional"].shape[0]}
         encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                    image_channels=sample["image"].shape[0],
                                    static_features=dataset.static_features,
                                    history_features=sample["history"].shape[-1],
                                    history_len=sample["history"].shape[-2],
                                    history_mode="panel" if panel else "sequence",
-                                   fusion=fusion)
+                                   fusion=fusion, **regional)
         start = time.time()
         losses = pretrain_catchment_encoder(encoder, dataset, epochs=args.epochs,
                                             batch_size=args.batch_size, lr=args.lr,
                                             device=args.device, wandb_run=wandb_run,
                                             cross_year_views=args.cross_year,
                                             blocked_batches=args.blocked_batches,
-                                            seed=args.seed)
-        # Extraction always uses the deterministic canonical panel (no cross-year sampling).
+                                            seed=args.seed,
+                                            train_fusion=not args.no_train_fusion,
+                                            fusion_modality_dropout=args.fusion_dropout)
+        # Extraction uses the deterministic canonical years (no cross-year sampling) but,
+        # for cross-year-trained encoders, the seasonal-only members the encoder was trained
+        # on: the flood/drought members are out-of-distribution for such encoders.
         extract_dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
-                                                    history_mode=args.history_mode) \
+                                                    history_mode=args.history_mode,
+                                                    seasonal_only=True) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
                                                   n_history_samples=args.n_history_samples)

@@ -122,6 +122,58 @@ def select_panel(flow: pd.Series, min_coverage: float = 0.5,
     return panel
 
 
+def regional_arrays(source_dir: str, site: str) -> Dict[str, np.ndarray]:
+    """
+    Loads a site's regional-context sidecar (``<site>_regional.npz``) if it exists.
+
+    :param source_dir: The state's embedding-record directory.
+    :type source_dir: str
+    :param site: The USGS site id.
+    :type site: str
+    :return: The sidecar arrays keyed as stored (image_regional, image_regional_alt, ...), or {}.
+    :rtype: Dict[str, np.ndarray]
+    """
+    path = os.path.join(source_dir, site + "_regional.npz")
+    if not os.path.exists(path):
+        return {}
+    with np.load(path, allow_pickle=True) as sidecar:
+        return {key: sidecar[key] for key in sidecar.files}
+
+
+def merge_regional(state: str, embedding_root: str, output_root: str) -> Dict[str, int]:
+    """
+    Adds regional-context arrays to already-built panel records that lack them.
+
+    :param state: Two-letter state abbreviation.
+    :type state: str
+    :param embedding_root: Root of the embedding records (holding the sidecars).
+    :type embedding_root: str
+    :param output_root: Root of the panel records.
+    :type output_root: str
+    :return: Counts of merged/already_merged/no_sidecar records.
+    :rtype: Dict[str, int]
+    """
+    source_dir, output_dir = os.path.join(embedding_root, state), os.path.join(output_root, state)
+    counts = {"merged": 0, "already_merged": 0, "no_sidecar": 0}
+    for name in sorted(os.listdir(output_dir)):
+        if not name.endswith(".npz") or name.endswith("_regional.npz"):
+            continue
+        output_path = os.path.join(output_dir, name)
+        with np.load(output_path, allow_pickle=True) as record:
+            if "image_regional" in record.files:
+                counts["already_merged"] += 1
+                continue
+            arrays = {key: record[key] for key in record.files}
+        regional = regional_arrays(source_dir, name[:-4])
+        if not regional:
+            counts["no_sidecar"] += 1
+            continue
+        np.savez_compressed(output_path + ".tmp.npz", **arrays, **regional)
+        os.replace(output_path + ".tmp.npz", output_path)
+        counts["merged"] += 1
+    return counts
+
+
 def build_state(state: str, embedding_root: str, scrape_root: str, output_root: str,
                 end_date: Optional[str] = None) -> Dict[str, int]:
     """
@@ -145,7 +197,7 @@ def build_state(state: str, embedding_root: str, scrape_root: str, output_root: 
     os.makedirs(output_dir, exist_ok=True)
     counts = {"built": 0, "already_done": 0, "no_hourly_csv": 0, "record_too_short": 0}
     for name in sorted(os.listdir(source_dir)):
-        if not name.endswith(".npz"):
+        if not name.endswith(".npz") or name.endswith("_regional.npz"):
             continue
         site = name[:-4]
         output_path = os.path.join(output_dir, name)
@@ -167,7 +219,8 @@ def build_state(state: str, embedding_root: str, scrape_root: str, output_root: 
                 output_path, image=record["image"], static=record["static"],
                 static_names=record["static_names"], panel=slices,
                 panel_types=np.array([t for t, _ in panel]),
-                panel_starts=np.array([str(s) for _, s in panel]))
+                panel_starts=np.array([str(s) for _, s in panel]),
+                **regional_arrays(source_dir, site))
         counts["built"] += 1
         print("%s: built (%s)" % (site, ", ".join(t for t, _ in panel)), flush=True)
     return counts
@@ -190,11 +243,17 @@ def main() -> None:
     parser.add_argument("--end-date", default=None,
                         help="Optional exclusive cutoff (e.g. 2022-01-01) for leakage-clean "
                              "banks")
+    parser.add_argument("--merge-regional", action="store_true",
+                        help="Only add regional-context sidecar arrays to existing panel "
+                             "records that lack them (no panel rebuild)")
     args = parser.parse_args()
     summary = {}
     for state in args.states:
-        summary[state] = build_state(state, args.embedding_root, args.scrape_root,
-                                     args.output_root, end_date=args.end_date)
+        if args.merge_regional:
+            summary[state] = merge_regional(state, args.embedding_root, args.output_root)
+        else:
+            summary[state] = build_state(state, args.embedding_root, args.scrape_root,
+                                         args.output_root, end_date=args.end_date)
     print(json.dumps(summary, indent=2))
 
 
