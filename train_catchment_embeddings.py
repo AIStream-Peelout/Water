@@ -104,6 +104,9 @@ def main() -> None:
                              "fusion suppress history)")
     parser.add_argument("--no-train-fusion", action="store_true",
                         help="Ablation: leave the fusion untrained (pre-#916 behavior)")
+    parser.add_argument("--fusion-head", default="mlp", choices=["mlp", "linear"],
+                        help="Map from fused tower features to the bank: the default MLP, or "
+                             "a linear head that keeps tower structure linearly readable")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -133,6 +136,7 @@ def main() -> None:
                           "seasonal_extraction": args.cross_year,
                           "train_fusion": not args.no_train_fusion,
                           "fusion_dropout": args.fusion_dropout,
+                          "fusion_head": args.fusion_head,
                           "regional_vision": "image_regional" in dataset[0],
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
@@ -153,7 +157,7 @@ def main() -> None:
                                    history_features=sample["history"].shape[-1],
                                    history_len=sample["history"].shape[-2],
                                    history_mode="panel" if panel else "sequence",
-                                   fusion=fusion, **regional)
+                                   fusion=fusion, fusion_head=args.fusion_head, **regional)
         start = time.time()
         losses = pretrain_catchment_encoder(encoder, dataset, epochs=args.epochs,
                                             batch_size=args.batch_size, lr=args.lr,
