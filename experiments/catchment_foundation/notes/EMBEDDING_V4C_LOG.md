@@ -292,3 +292,30 @@ balanced 0.95/0.95/0.97). The MLP fusion (LayerNorm→Linear→GELU→Linear) tr
 scrambles linearly-readable structure the towers carry. Candidate fix: a linear fusion
 (LayerNorm→Linear, optionally residual to the concat) or shipping the L2 tower concat as the
 bank while keeping the fused head as a training signal — decide by a CO/UT A/B (3 min/run).
+
+## 9. Regional-context imagery + linear fusion head (2026-09-11)
+
+The gauge-reach image is a 1.28 km, 10 m crop of a 110 km Sentinel-2 tile — full resolution,
+tiny extent: 0.3% of the median catchment (530 km²). Vision therefore learned channel size
+and identity, not regime. New second image modality: **25.6 km at 50 m (512 px), 6 bands
+(10 m bands + SWIR B11/B12), summer scene + winter scene** of the same window (a hard
+cross-season positive for the vision tower).
+
+Code (all committed):
+- Water `sentinel_functions.py`: `extract_patch(pixel_meters=, resampling=)` reads coarse
+  windows via reduced-resolution JPEG2000 decode (23 s for 6 bands at 512 px); tile ordering
+  by distance to tile center; `gcs_get()` retries; 404 metadata tolerated; GDAL HTTP retries.
+- Water `embedding_dataset.py --regional --shard i/n`: `select_scene_patch()` (best-covered
+  candidate, same-datatake mosaic fill, `accept_valid`), per-(tile, window) scene metadata
+  cache, sharded resumable collection writing `<site>_regional.npz` sidecars
+  (`image_regional`, `image_regional_alt`) + `manifest_regional[.shard<i>].csv`.
+- Water `build_panel_records.py --merge-regional`: folds sidecars into panel records.
+- FF PR #917 `regional-vision-modality` (base #916): `CatchmentEncoder(regional_image_size=,
+  regional_channels=, regional_patch_size=32)` adds a `vision_regional` tower; loader serves
+  `image_regional[_alt]`; trainer derives modality pairs/alias views from the encoder.
+- FF PR #918 `linear-fusion` (base #917): `fusion_head="linear"` (LayerNorm→Linear) to keep
+  tower structure linearly readable in the bank; Water CLI `--fusion-head`.
+
+Runs: regional collection launched for all 5 states (8 shards, scene year 2025, overnight);
+CO/UT A/B `COUT_v7b_linear_s{42,43,44}` (linear head) vs `COUT_v7a_d05_*` (MLP head).
+v8 = regional tower + winning head + batch 128, 3 seeds, once sidecars are merged.
