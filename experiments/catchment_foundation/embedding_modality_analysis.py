@@ -225,13 +225,21 @@ def main() -> None:
     # Checkpoints from before the fusion was trained have no fused_head and were trained
     # without tower normalization; reproduce their training-time encode exactly.
     trained_fusion = "fused_head.weight" in state
+    # Head type and optional regional tower are read off the checkpoint as well.
+    fusion_head = "mlp" if "projection.3.weight" in state else "linear"
+    regional = {}
+    if "encoders.vision_regional.patch_embedding.weight" in state or any(
+            key.startswith("encoders.vision_regional.") for key in state):
+        regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
+                    "regional_channels": sample["image_regional"].shape[0]}
     encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                image_channels=sample["image"].shape[0],
                                static_features=dataset.static_features,
                                history_features=sample["history"].shape[-1],
                                history_len=sample["history"].shape[-2],
                                history_mode="panel", fusion=args.fusion,
-                               normalize_towers=trained_fusion)
+                               normalize_towers=trained_fusion, fusion_head=fusion_head,
+                               **regional)
     encoder.load_state_dict(state, strict=trained_fusion)
     encoder = encoder.to(args.device).eval()
 
