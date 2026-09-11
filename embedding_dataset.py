@@ -92,6 +92,36 @@ REGIONAL_BANDS = ("B02", "B03", "B04", "B08", "B11", "B12")
 REGIONAL_WINDOWS = {"summer": ((6, 1), (10, 1)), "winter": ((1, 1), (4, 1))}
 
 
+_SCENE_CACHE: Dict[Tuple[str, str, str], Optional[pd.DataFrame]] = {}
+
+
+def annotated_scenes(tile: str, scene_window: Tuple[datetime, datetime]
+                     ) -> Optional[pd.DataFrame]:
+    """
+    Lists a tile's scenes in a window with cloud cover and footprint, cached per process.
+
+    A state's gauges share a handful of tiles, so the ~60 metadata fetches per tile and
+    window are paid once per collection run instead of once per gauge.
+
+    :param tile: The MGRS tile id.
+    :type tile: str
+    :param scene_window: (start, end) sensing-time window.
+    :type scene_window: Tuple[datetime, datetime]
+    :return: Scenes with "cloud" and "footprint" columns, or None when the tile has no scenes.
+    :rtype: pd.DataFrame, optional
+    """
+    key = (tile, scene_window[0].isoformat(), scene_window[1].isoformat())
+    if key not in _SCENE_CACHE:
+        scenes = list_sentinel_safes(tile, scene_window[0], scene_window[1])
+        if scenes.empty:
+            _SCENE_CACHE[key] = None
+        else:
+            metadata = [get_scene_metadata(prefix) for prefix in scenes["safe_prefix"]]
+            _SCENE_CACHE[key] = scenes.assign(cloud=[m["cloud"] for m in metadata],
+                                              footprint=[m["footprint"] for m in metadata])
+    return _SCENE_CACHE[key]
+
+
 def covering_scenes(tile: str, latitude: float, longitude: float,
                     scene_window: Tuple[datetime, datetime]) -> Optional[pd.DataFrame]:
     """
@@ -109,14 +139,11 @@ def covering_scenes(tile: str, latitude: float, longitude: float,
         has no scenes at all in the window.
     :rtype: pd.DataFrame, optional
     """
-    scenes = list_sentinel_safes(tile, scene_window[0], scene_window[1])
-    if scenes.empty:
+    scenes = annotated_scenes(tile, scene_window)
+    if scenes is None:
         return None
-    metadata = [get_scene_metadata(prefix) for prefix in scenes["safe_prefix"]]
-    scenes = scenes.assign(
-        cloud=[m["cloud"] for m in metadata],
-        covers=[footprint_contains(m["footprint"], latitude, longitude) for m in metadata])
-    return scenes[scenes["covers"]].sort_values("cloud")
+    covers = [footprint_contains(fp, latitude, longitude) for fp in scenes["footprint"]]
+    return scenes[covers].sort_values("cloud")
 
 
 def valid_fraction(patch: np.ndarray) -> float:
@@ -135,7 +162,8 @@ def select_scene_patch(latitude: float, longitude: float, scene_window: Tuple[da
                        bands: Tuple[str, ...] = ("B02", "B03", "B04", "B08"),
                        patch_size: int = 128, pixel_meters: float = 10.0,
                        resampling: str = "nearest", max_tries: int = 5,
-                       min_valid: float = 0.5, mosaic: bool = False, max_fill: int = 2
+                       min_valid: float = 0.5, mosaic: bool = False, max_fill: int = 2,
+                       accept_valid: float = 0.98
                        ) -> Tuple[Optional[np.ndarray], Optional[pd.Series], str]:
     """
     Extracts a patch from the clearest scene in a window that actually covers the point.
@@ -169,6 +197,10 @@ def select_scene_patch(latitude: float, longitude: float, scene_window: Tuple[da
     :type mosaic: bool, optional
     :param max_fill: Maximum extra scene reads for the mosaic, defaults to 2.
     :type max_fill: int, optional
+    :param accept_valid: Valid fraction at which a candidate is accepted without reading
+        further candidates (and the mosaic stops), defaults to 0.98. Wide regional windows
+        rarely reach that, so callers budget reads with a lower value.
+    :type accept_valid: float, optional
     :return: (patch, chosen scene row, "ok"), or (None, None, failure status) where the status
         is "no_sentinel_scenes", "no_covering_scene" or "no_valid_patch".
     :rtype: Tuple[Optional[np.ndarray], Optional[pd.Series], str]
@@ -192,7 +224,7 @@ def select_scene_patch(latitude: float, longitude: float, scene_window: Tuple[da
             valid = valid_fraction(candidate)
             if best is None or valid > best[2]:
                 best = (candidate, scene, valid)
-            if valid >= 0.98:
+            if valid >= accept_valid:
                 break
         if best is not None and best[2] >= min_valid:
             break
@@ -203,7 +235,7 @@ def select_scene_patch(latitude: float, longitude: float, scene_window: Tuple[da
     patch, scene, valid = best
     fills = 0
     for tile in tiles if mosaic else ():
-        if valid >= 0.98 or fills >= max_fill:
+        if valid >= accept_valid or fills >= max_fill:
             break
         covering = covering_by_tile.get(tile, "unlisted")
         if isinstance(covering, str):
@@ -213,7 +245,7 @@ def select_scene_patch(latitude: float, longitude: float, scene_window: Tuple[da
         others = covering[covering["product_id"] != scene["product_id"]]
         same_day = others["sensing_time"].dt.date == scene["sensing_time"].date()
         for _, other in pd.concat([others[same_day], others[~same_day]]).iterrows():
-            if valid >= 0.98 or fills >= max_fill:
+            if valid >= accept_valid or fills >= max_fill:
                 break
             candidate = extract_patch(other["safe_prefix"], latitude, longitude, bands=bands,
                                       patch_size=patch_size, pixel_meters=pixel_meters,
@@ -257,11 +289,14 @@ def collect_regional_record(site_number: str, latitude: float, longitude: float,
     arrays, row = {}, {"site_no": site_number}
     for season, ((start_month, start_day), (end_month, end_day)) in REGIONAL_WINDOWS.items():
         window = (datetime(year, start_month, start_day), datetime(year, end_month, end_day))
+        # Read budget: at most 2 candidates + 2 mosaic fills per season (a wide window rarely
+        # reaches 98% valid, so accept 90% and stop).
         patch, scene, status = select_scene_patch(latitude, longitude, window, bands=bands,
                                                   patch_size=patch_size,
                                                   pixel_meters=pixel_meters,
-                                                  resampling="average", min_valid=0.3,
-                                                  mosaic=True)
+                                                  resampling="average", max_tries=2,
+                                                  min_valid=0.3, mosaic=True, max_fill=2,
+                                                  accept_valid=0.9)
         if patch is None:
             row["status"] = season + "_" + status
             return row
@@ -279,7 +314,8 @@ def collect_regional_record(site_number: str, latitude: float, longitude: float,
 def run_regional_collection(state_abbrev: str,
                             output_root: str = os.path.join("pilot_data", "embedding_dataset"),
                             year: Optional[int] = None, limit: Optional[int] = None,
-                            patch_size: int = 512, pixel_meters: float = 50.0) -> pd.DataFrame:
+                            patch_size: int = 512, pixel_meters: float = 50.0,
+                            shard: Tuple[int, int] = (0, 1)) -> pd.DataFrame:
     """
     Adds regional-context sidecars for every successfully collected gauge of a state, resumably.
 
@@ -295,14 +331,20 @@ def run_regional_collection(state_abbrev: str,
     :type patch_size: int, optional
     :param pixel_meters: Ground size of one output pixel, defaults to 50.0.
     :type pixel_meters: float, optional
-    :return: The regional manifest dataframe.
+    :param shard: (index, count) — process every count-th gauge starting at index, with a
+        per-shard manifest, so a state can run as several parallel processes. Defaults to
+        (0, 1) (all gauges, ``manifest_regional.csv``).
+    :type shard: Tuple[int, int], optional
+    :return: The regional manifest dataframe of this shard.
     :rtype: pd.DataFrame
     """
     state_dir = os.path.join(output_root, state_abbrev)
     base = pd.read_csv(os.path.join(state_dir, "manifest.csv"), dtype={"site_no": str})
-    sites = base[base["status"] == "ok"]["site_no"].tolist()
+    sites = base[base["status"] == "ok"]["site_no"].tolist()[shard[0]::shard[1]]
     gauges = list_state_gauges(state_abbrev).set_index("site_no")
-    manifest_path = os.path.join(state_dir, "manifest_regional.csv")
+    manifest_name = "manifest_regional.csv" if shard == (0, 1) \
+        else "manifest_regional.shard%d.csv" % shard[0]
+    manifest_path = os.path.join(state_dir, manifest_name)
     manifest: List[Dict] = pd.read_csv(manifest_path, dtype={"site_no": str}).to_dict("records") \
         if os.path.exists(manifest_path) else []
     done = {row["site_no"] for row in manifest}
@@ -462,11 +504,16 @@ def main() -> None:
                         help="Scene-window year for --regional (default: last calendar year)")
     parser.add_argument("--regional-size", type=int, default=512)
     parser.add_argument("--regional-pixel-meters", type=float, default=50.0)
+    parser.add_argument("--shard", default="0/1",
+                        help="index/count for --regional: run this process on every count-th "
+                             "gauge starting at index (parallel shards, per-shard manifests)")
     args = parser.parse_args()
     if args.regional:
+        index, count = (int(part) for part in args.shard.split("/"))
         manifest = run_regional_collection(args.state, year=args.scene_year, limit=args.limit,
                                            patch_size=args.regional_size,
-                                           pixel_meters=args.regional_pixel_meters)
+                                           pixel_meters=args.regional_pixel_meters,
+                                           shard=(index, count))
     else:
         manifest = run_state_collection(args.state, history_years=args.history_years,
                                         limit=args.limit)
