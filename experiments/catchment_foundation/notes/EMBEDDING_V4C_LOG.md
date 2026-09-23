@@ -333,3 +333,19 @@ default; `--fusion-head mlp` keeps the old head.
 Regional collection: 8 shards, 0 errors in the first ~60 gauges, ~3.5 min/gauge/shard.
 `run_v8_when_collected.sh` waits for the shards, merges sidecars, trains v8 (regional) vs
 v8ctl (`--no-regional`), linear head, batch 128, 3 seeds each, and evaluates both vs v7.
+
+### 9b. Regional collection done; v8 first attempt hit a loader collate bug (2026-09-12/23)
+
+Collection: 675/678 gauges got summer+winter regional sidecars (2 `no_coordinates`, 1
+`error`), median valid fraction 1.0 for both seasons, 12.5 h wall over 8 shards. Merge folded
+regional arrays into 553/555 pre-2022 panel records.
+
+The first v8 attempt failed in 40 s: the loader served `image_regional` per record, so the 2
+records without a sidecar produced items with different keys and the default collate raised
+`KeyError` on any batch containing them — for the regional run AND the `--no-regional`
+control (which only skipped the tower). Framework fix in FF (`regional-vision-modality`,
+commit 9a73200f, test added): `CatchmentEmbeddingDataset(regional="auto"|"require"|"ignore")`
+resolves the policy once at construction — auto excludes records lacking the patch
+(`excluded_sites`, warning), ignore is a true control. Water CLI `--no-regional` now passes
+`regional="ignore"`; excluded sites are recorded in `training_summary.json`. `linear-fusion`
+rebased onto the fix. v8 relaunched: regional runs train on 553 sites, control on 555.
