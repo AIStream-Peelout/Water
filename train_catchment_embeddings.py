@@ -142,18 +142,24 @@ def main() -> None:
                           "fusion_head": args.fusion_head,
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
+        regional_policy = "ignore" if args.no_regional else "auto"
         dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                             history_mode=args.history_mode,
-                                            cross_year_views=args.cross_year)
+                                            cross_year_views=args.cross_year,
+                                            regional=regional_policy)
+        if dataset.excluded_sites:
+            print("excluded %d records without regional patches: %s"
+                  % (len(dataset.excluded_sites), ", ".join(dataset.excluded_sites)))
         sample = dataset[0]
         panel = args.history_mode == "hourly_panel"
         # Records carrying a regional-context patch (see embedding_dataset.py --regional) get a
         # fourth tower; the loader also serves its other-season view as a cross-season positive.
         regional = {}
-        if "image_regional" in sample and not args.no_regional:
+        if "image_regional" in sample:
             regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
                         "regional_channels": sample["image_regional"].shape[0]}
         summary["config"]["regional_vision"] = bool(regional)
+        summary["config"]["excluded_sites"] = list(dataset.excluded_sites)
         encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                    image_channels=sample["image"].shape[0],
                                    static_features=dataset.static_features,
@@ -175,7 +181,8 @@ def main() -> None:
         # on: the flood/drought members are out-of-distribution for such encoders.
         extract_dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                                     history_mode=args.history_mode,
-                                                    seasonal_only=True) \
+                                                    seasonal_only=True,
+                                                    regional=regional_policy) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
                                                   n_history_samples=args.n_history_samples)
