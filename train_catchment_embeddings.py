@@ -110,6 +110,9 @@ def main() -> None:
     parser.add_argument("--no-regional", action="store_true",
                         help="Ignore regional-context patches in the records (control run "
                              "without the vision_regional tower)")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="DataLoader worker processes; records with regional patches "
+                             "decompress ~12 MB each per epoch, which serializes without workers")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
@@ -175,7 +178,8 @@ def main() -> None:
                                             blocked_batches=args.blocked_batches,
                                             seed=args.seed,
                                             train_fusion=not args.no_train_fusion,
-                                            fusion_modality_dropout=args.fusion_dropout)
+                                            fusion_modality_dropout=args.fusion_dropout,
+                                            num_workers=args.num_workers)
         # Extraction uses the deterministic canonical years (no cross-year sampling) but,
         # for cross-year-trained encoders, the seasonal-only members the encoder was trained
         # on: the flood/drought members are out-of-distribution for such encoders.
@@ -185,7 +189,8 @@ def main() -> None:
                                                     regional=regional_policy) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
-                                                  n_history_samples=args.n_history_samples)
+                                                  n_history_samples=args.n_history_samples,
+                                                  num_workers=args.num_workers)
         torch.save(encoder.state_dict(),
                    os.path.join(args.output_dir, "encoder_%s.pt" % fusion))
         torch.save({"site_ids": site_ids, "embeddings": embeddings},

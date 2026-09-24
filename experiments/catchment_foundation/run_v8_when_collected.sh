@@ -27,12 +27,14 @@ done
 stamp "merging sidecars into panel records"
 $PY -u build_panel_records.py --states $STATES --merge-regional --output-root "$ROOT" || exit 1
 
-train() {  # name seed extra-args...
+train() {  # name seed extra-args...   (idempotent: skips runs that already have a bank)
   local name=$1 seed=$2; shift 2
+  if [ -f "$ROOT/$name/embeddings_concat.pt" ]; then stamp "$name already trained, skipping"; return; fi
   $PY -u train_catchment_embeddings.py --states $STATES --data-root "$ROOT" \
       --scrape-root pilot_data/scrapes --output-dir "$ROOT/$name" --fusions concat \
-      --epochs 300 --seed "$seed" --batch-size 128 --history-mode hourly_panel --cross-year \
-      --blocked-batches --no-wandb "$@" > "$ROOT/train_$name.log" 2>&1
+      --epochs 300 --seed "$seed" --batch-size 128 --num-workers "${NUM_WORKERS:-6}" \
+      --history-mode hourly_panel --cross-year --blocked-batches --no-wandb "$@" \
+      > "$ROOT/train_$name.log" 2>&1
 }
 
 stamp "training v8 (regional) and v8 control (no regional), 3 seeds each, batch 128"
