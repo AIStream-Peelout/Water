@@ -349,3 +349,21 @@ resolves the policy once at construction — auto excludes records lacking the p
 (`excluded_sites`, warning), ignore is a true control. Water CLI `--no-regional` now passes
 `regional="ignore"`; excluded sites are recorded in `training_summary.json`. `linear-fusion`
 rebased onto the fix. v8 relaunched: regional runs train on 553 sites, control on 555.
+
+### 9c. v8 relaunch was loader-bound: three fixes (2026-09-23/24)
+
+The relaunched regional chain ran at ~3 min/epoch (control: 2.5 s). Diagnosis in order:
+1. Single-threaded decoding of ~12 MB of regional imagery per record → FF `num_workers`
+   (persistent workers) in `pretrain_encoder`/`extract_embeddings`; Water `--num-workers`.
+   3× faster, still ~65 s/epoch.
+2. zlib-compressed float32 records → panel records now stored uncompressed with uint16
+   regional images (lossless for L1C DN; `--merge-regional --force-regional` converted all
+   553). Record load 6 ms — but epoch time unchanged, so decompression was not the wall.
+3. Profiling one batch of 128: regional tower forward+backward 0.4 s, batch load **22.6 s** —
+   two float32 views = 3.2 GB per batch crossing worker→trainer shared memory. Fix (FF):
+   loader serves regional images as unscaled float16 (`regional_half=True`) and the trainer
+   scales on the device via `input_transforms` (`dataset.regional_transform`, wired
+   automatically by the catchment wrappers). Batches now arrive in ~0 s (prefetched), device
+   transfer + scaling 0.37 s. Expected ≈ 1 h per 300-epoch fleet seed.
+
+All three are on `regional-vision-modality` (PR #917); `linear-fusion` (PR #918) rebased.
