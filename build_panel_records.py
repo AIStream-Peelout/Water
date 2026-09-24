@@ -140,9 +140,31 @@ def regional_arrays(source_dir: str, site: str) -> Dict[str, np.ndarray]:
         return {key: sidecar[key] for key in sidecar.files}
 
 
-def merge_regional(state: str, embedding_root: str, output_root: str) -> Dict[str, int]:
+def compact_regional(regional: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """
+    Stores regional images as uint16 (lossless for Sentinel-2 L1C digital numbers).
+
+    A float32 512x512x6 patch is 6.3 MB; two seasons per record, zlib-compressed, cost
+    ~3 min of decompression per fleet epoch. uint16 halves the bytes and, written
+    uncompressed, loads as a plain copy.
+
+    :param regional: The sidecar arrays.
+    :type regional: Dict[str, np.ndarray]
+    :return: The arrays with image_regional* cast to uint16.
+    :rtype: Dict[str, np.ndarray]
+    """
+    return {key: (np.clip(np.rint(value), 0, 65535).astype(np.uint16)
+                  if key.startswith("image_regional") else value)
+            for key, value in regional.items()}
+
+
+def merge_regional(state: str, embedding_root: str, output_root: str,
+                   force: bool = False) -> Dict[str, int]:
     """
     Adds regional-context arrays to already-built panel records that lack them.
+
+    Records are rewritten uncompressed with uint16 regional images (see
+    :func:`compact_regional`) so training epochs are not decompression-bound.
 
     :param state: Two-letter state abbreviation.
     :type state: str
@@ -150,6 +172,9 @@ def merge_regional(state: str, embedding_root: str, output_root: str) -> Dict[st
     :type embedding_root: str
     :param output_root: Root of the panel records.
     :type output_root: str
+    :param force: Rewrite records that already carry regional arrays (e.g. to convert
+        earlier float32/compressed merges), defaults to False.
+    :type force: bool, optional
     :return: Counts of merged/already_merged/no_sidecar records.
     :rtype: Dict[str, int]
     """
@@ -160,15 +185,17 @@ def merge_regional(state: str, embedding_root: str, output_root: str) -> Dict[st
             continue
         output_path = os.path.join(output_dir, name)
         with np.load(output_path, allow_pickle=True) as record:
-            if "image_regional" in record.files:
+            if "image_regional" in record.files and not force:
                 counts["already_merged"] += 1
                 continue
-            arrays = {key: record[key] for key in record.files}
+            arrays = {key: record[key] for key in record.files
+                      if not key.startswith("image_regional") and key not in ("bands",
+                                                                              "pixel_meters")}
         regional = regional_arrays(source_dir, name[:-4])
         if not regional:
             counts["no_sidecar"] += 1
             continue
-        np.savez_compressed(output_path + ".tmp.npz", **arrays, **regional)
+        np.savez(output_path + ".tmp.npz", **arrays, **compact_regional(regional))
         os.replace(output_path + ".tmp.npz", output_path)
         counts["merged"] += 1
     return counts
@@ -214,13 +241,15 @@ def build_state(state: str, embedding_root: str, scrape_root: str, output_root: 
             counts["record_too_short"] += 1
             continue
         slices = np.stack([slice_window(flow, start) for _, start in panel])
+        # Uncompressed: training reads every record every epoch, and regional images make
+        # zlib decompression the epoch bottleneck (the panel itself is only ~400 KB).
         with np.load(os.path.join(source_dir, name), allow_pickle=True) as record:
-            np.savez_compressed(
+            np.savez(
                 output_path, image=record["image"], static=record["static"],
                 static_names=record["static_names"], panel=slices,
                 panel_types=np.array([t for t, _ in panel]),
                 panel_starts=np.array([str(s) for _, s in panel]),
-                **regional_arrays(source_dir, site))
+                **compact_regional(regional_arrays(source_dir, site)))
         counts["built"] += 1
         print("%s: built (%s)" % (site, ", ".join(t for t, _ in panel)), flush=True)
     return counts
@@ -246,11 +275,15 @@ def main() -> None:
     parser.add_argument("--merge-regional", action="store_true",
                         help="Only add regional-context sidecar arrays to existing panel "
                              "records that lack them (no panel rebuild)")
+    parser.add_argument("--force-regional", action="store_true",
+                        help="With --merge-regional: rewrite records that already carry "
+                             "regional arrays (converts them to uint16, uncompressed)")
     args = parser.parse_args()
     summary = {}
     for state in args.states:
         if args.merge_regional:
-            summary[state] = merge_regional(state, args.embedding_root, args.output_root)
+            summary[state] = merge_regional(state, args.embedding_root, args.output_root,
+                                            force=args.force_regional)
         else:
             summary[state] = build_state(state, args.embedding_root, args.scrape_root,
                                          args.output_root, end_date=args.end_date)
