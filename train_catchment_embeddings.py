@@ -110,6 +110,15 @@ def main() -> None:
     parser.add_argument("--no-regional", action="store_true",
                         help="Ignore regional-context patches in the records (control run "
                              "without the vision_regional tower)")
+    parser.add_argument("--embedding-dim", type=int, default=256,
+                        help="Width of the fused catchment embedding (the bank)")
+    parser.add_argument("--vision-source", default="reach", choices=["reach", "regional"],
+                        help="Image fed to the main vision tower: the 1.28 km gauge-reach patch "
+                             "(default) or the 25.6 km regional-context patch, whose winter "
+                             "scene then serves as the tower's cross-season positive")
+    parser.add_argument("--vision-patch-size", type=int, default=None,
+                        help="ViT patch size of the vision tower (default 16 for reach, 32 for "
+                             "regional)")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes; records with regional patches "
                              "decompress ~12 MB each per epoch, which serializes without workers")
@@ -143,13 +152,19 @@ def main() -> None:
                           "train_fusion": not args.no_train_fusion,
                           "fusion_dropout": args.fusion_dropout,
                           "fusion_head": args.fusion_head,
+                          "embedding_dim": args.embedding_dim,
+                          "vision_source": args.vision_source,
+                          "vision_patch_size": args.vision_patch_size,
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         regional_policy = "ignore" if args.no_regional else "auto"
+        if args.vision_source == "regional":
+            regional_policy = "require"
         dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                             history_mode=args.history_mode,
                                             cross_year_views=args.cross_year,
-                                            regional=regional_policy)
+                                            regional=regional_policy,
+                                            vision_source=args.vision_source)
         if dataset.excluded_sites:
             print("excluded %d records without regional patches: %s"
                   % (len(dataset.excluded_sites), ", ".join(dataset.excluded_sites)))
@@ -163,12 +178,14 @@ def main() -> None:
                         "regional_channels": sample["image_regional"].shape[0]}
         summary["config"]["regional_vision"] = bool(regional)
         summary["config"]["excluded_sites"] = list(dataset.excluded_sites)
+        patch_size = args.vision_patch_size or (32 if args.vision_source == "regional" else 16)
         encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                    image_channels=sample["image"].shape[0],
                                    static_features=dataset.static_features,
                                    history_features=sample["history"].shape[-1],
                                    history_len=sample["history"].shape[-2],
                                    history_mode="panel" if panel else "sequence",
+                                   patch_size=patch_size, embedding_dim=args.embedding_dim,
                                    fusion=fusion, fusion_head=args.fusion_head, **regional)
         start = time.time()
         losses = pretrain_catchment_encoder(encoder, dataset, epochs=args.epochs,
@@ -186,7 +203,8 @@ def main() -> None:
         extract_dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                                     history_mode=args.history_mode,
                                                     seasonal_only=True,
-                                                    regional=regional_policy) \
+                                                    regional=regional_policy,
+                                                    vision_source=args.vision_source) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
                                                   n_history_samples=args.n_history_samples,
