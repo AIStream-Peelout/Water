@@ -42,8 +42,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from embedding_probes import build_signature_table, ridge_probe_r2  # noqa: E402
 
 WATER_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MODALITIES = ("vision", "tabular", "history")
-INPUT_KEYS = {"vision": "image", "tabular": "static", "history": "history"}
+INPUT_KEYS = {"vision": "image", "tabular": "static", "history": "history",
+              "vision_regional": "image_regional"}
 
 
 def seasonal_members(history: torch.Tensor) -> torch.Tensor:
@@ -90,15 +90,17 @@ def encode_towers(encoder, dataset, device: str, batch_size: int = 32,
                                                 shuffle=False)) if alt_dataset else None
     collected: Dict[str, List[torch.Tensor]] = {}
     for batch in loader:
-        inputs = {name: batch[key].to(device) for name, key in INPUT_KEYS.items()}
+        inputs = {name: batch[INPUT_KEYS[name]].to(device) for name in encoder.encoders}
         if seasonal_only:
             inputs["history"] = seasonal_members(inputs["history"])
+        if "vision_regional" in inputs and getattr(dataset, "regional_half", False):
+            inputs["vision_regional"] = dataset.regional_transform(inputs["vision_regional"])
         # Use the encoder's own tower/pool/fuse path so pooled blocks carry the encoder's
         # normalization and "embedding" is exactly the shipped bank.
         outputs = encoder.encode_towers(inputs)
         pooled = encoder.pool_towers(outputs)
         parts = {"embedding": encoder.fuse(outputs)}
-        for name in MODALITIES:
+        for name in encoder.encoders:
             parts["pooled_" + name] = pooled[name]
             parts["proj_" + name] = encoder.contrastive_heads[name](pooled[name])
         if alt_iter is not None:
@@ -147,7 +149,7 @@ def knockout(encoder, pooled: Dict[str, torch.Tensor], embedding: torch.Tensor,
     generator = torch.Generator().manual_seed(seed)
     n_sites = embedding.shape[0]
     results = {}
-    for name in MODALITIES:
+    for name in encoder.encoders:
         results[name] = {}
         for mode in ("mean_fill", "permute"):
             blocks = dict(pooled)
@@ -247,7 +249,8 @@ def main() -> None:
                              alt_dataset=alt_dataset)
     encoder = encoder.cpu()
     site_ids = list(dataset.site_ids)
-    pooled = {name: features["pooled_" + name] for name in MODALITIES}
+    towers = list(encoder.encoders)
+    pooled = {name: features["pooled_" + name] for name in towers}
     report: Dict = {"version_dir": args.version_dir, "n_sites": len(site_ids),
                     "history_view": "seasonal_only" if args.seasonal_only else "canonical6"}
     suffix = "_seasonal" if args.seasonal_only else ""
@@ -259,19 +262,21 @@ def main() -> None:
 
     pairs = [("vision", "history"), ("vision", "tabular"), ("tabular", "history"),
              ("history", "history_alt")]
+    if "vision_regional" in towers:
+        pairs += [("vision_regional", "history"), ("vision_regional", "vision")]
     report["cross_modal_retrieval"] = {
         "%s->%s" % (a, b): retrieval_accuracy(features["proj_" + a], features["proj_" + b])
         for a, b in pairs}
     report["cross_modal_retrieval"]["chance_top1"] = round(1.0 / len(site_ids), 4)
 
     # Alternative banks built from the trained parts of the network.
-    normalized = [torch.nn.functional.normalize(pooled[m], dim=-1) for m in MODALITIES]
+    normalized = [torch.nn.functional.normalize(pooled[m], dim=-1) for m in towers]
     banks = {"fused_bank": features["embedding"],
              "pooled_concat_l2": torch.cat(normalized, dim=-1),
              "contrastive_concat": torch.cat(
                  [torch.nn.functional.normalize(features["proj_" + m], dim=-1)
-                  for m in MODALITIES], dim=-1)}
-    for name in MODALITIES:
+                  for m in towers], dim=-1)}
+    for name in towers:
         banks["pooled_" + name] = pooled[name]
         banks["proj_" + name] = features["proj_" + name]
     for name in ("pooled_concat_l2", "contrastive_concat", "pooled_history"):
