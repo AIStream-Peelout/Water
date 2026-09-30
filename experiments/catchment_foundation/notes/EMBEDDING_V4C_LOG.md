@@ -389,3 +389,28 @@ batch 128, linear head — (a) `--embedding-dim` 256/384/512 controls; (b) at 51
 `--vision-source regional` (25.6 km patch as THE vision input, winter scene as its positive)
 vs the 4-tower layout. FF `regional-vision-modality` gained `vision_source="regional"`.
 GPU is on the table for the fleet follow-up (regional runs take ~4.5 h/seed on MPS).
+
+### 10a. v9 queue paused; how to run it on another machine (2026-09-30)
+
+The v9 A/Bs (width sweep 256/384/512; regional patch as the vision input; four-tower; all
+CO/UT, batch 128, linear head, 3 seeds) were started on the MacBook and stopped after one
+finished run (`COUT_v9w256_s42`): two concurrent MPS runs reached 30 GB of RAM (18 GB for the
+regional-vision run, 12 GB for a control) on a 36 GB daily-use laptop. Standing rules since:
+big jobs get a placement decision first (MacBook when not traveling / Mac Studio / GCP), one
+MPS training at a time, 20 GB memory budget on the MacBook.
+
+`run_v9_queue.sh` is the portable runner: sequential, idempotent (skips runs with a bank),
+MPS cache capped via `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, regional runs limited to 2 loader
+workers, and it stops itself if the running job's footprint passes `MEM_BUDGET_GB`.
+
+To run on another machine (e.g. the Mac Studio):
+1. Clone Water (`foundation_model_experiments`) and flow-forecast (`linear-fusion`); create a
+   Python env with torch and flow-forecast's requirements.
+2. Copy the panel records — `pilot_data/embedding_dataset_hourly_pre2022/{CO,UT}` (1.3 GB;
+   all five states are 3.5 GB) — to the same relative path. Training needs nothing else.
+3. From the Water root: `FF_REPO=<flow-forecast path> PY=<python> MEM_BUDGET_GB=<n> nohup
+   experiments/catchment_foundation/run_v9_queue.sh > v9_queue.log 2>&1 &`
+   (`DEVICE=cuda` on a GPU box; `RUN_GROUPS="w384 w512"` to run a subset).
+4. Copy the resulting `COUT_v9*/` directories back; probes and attribution run locally since
+   they need the hourly scrape CSVs.
+Expected on Apple silicon: width-sweep runs ~12 min each, regional runs ~2 h each.
