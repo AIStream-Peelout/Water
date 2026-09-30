@@ -367,3 +367,25 @@ The relaunched regional chain ran at ~3 min/epoch (control: 2.5 s). Diagnosis in
    transfer + scaling 0.37 s. Expected ≈ 1 h per 300-epoch fleet seed.
 
 All three are on `regional-vision-modality` (PR #917); `linear-fusion` (PR #918) rebased.
+
+## 10. v8 result (2026-09-25): linear head + batch 128 wins; fourth-tower regional imagery does not
+
+Same 206 CO/UT sites, 3-seed means, shipped fused bank (fleet-trained, 555/553 sites):
+
+| bank                                        | size  | flash | melt  | BFI   | diurnal |
+|---------------------------------------------|-------|-------|-------|-------|---------|
+| v7 — MLP head, batch 64                     | 0.318 | 0.201 | 0.227 | 0.090 | 0.167   |
+| **v8ctl — linear head, batch 128**          | 0.402 | 0.304 | 0.263 | 0.111 | 0.201   |
+| v8 — v8ctl + regional tower (4 towers)      | 0.326 | 0.270 | 0.264 | 0.117 | 0.193   |
+
+Fleet-wide v8ctl: 0.475 / 0.446 / 0.273 / 0.210 (v7: 0.312 / 0.266 / 0.128 / 0.165) — the best
+bank so far by a wide margin. `FLEET_v8ctl_*` is the production bank. The regional tower took
+19% of the pooled variance and pulled size/flashiness back toward v7 with no gain on melt/BFI:
+as a fourth input to a 256-d code it dilutes rather than adds. Standing gap unchanged in kind:
+the fused bank still trails its own tower concat on melt (v8ctl s42 fleet: 0.248 vs 0.382).
+
+Next (user direction: widen the code; high-res imagery deserves a fairer test): CO/UT A/Bs at
+batch 128, linear head — (a) `--embedding-dim` 256/384/512 controls; (b) at 512:
+`--vision-source regional` (25.6 km patch as THE vision input, winter scene as its positive)
+vs the 4-tower layout. FF `regional-vision-modality` gained `vision_source="regional"`.
+GPU is on the table for the fleet follow-up (regional runs take ~4.5 h/seed on MPS).
