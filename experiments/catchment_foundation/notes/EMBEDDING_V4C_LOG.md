@@ -435,3 +435,37 @@ fleet training for a region's own probes — fleet-scale banks pay for breadth w
 
 High-res A/B rerun at batch 64 (`v9c` control at dim 512, `v9r`, `v9t`): at batch 128 the
 regional runs need > 12.6 GB of MPS memory, over the 20 GB machine budget with headroom.
+
+### 10c. High-res A/B result (2026-10-11) and the external review
+
+v9 (CO/UT, batch 64, width 512, linear head, 3 seeds, same 206 sites), fused bank R²:
+
+| config                              | fixed α=10: size/flash/melt/BFI | nested-CV α: size/flash/melt/BFI |
+|-------------------------------------|---------------------------------|-----------------------------------|
+| v9c reach image (control)           | 0.272 / 0.274 / 0.376 / 0.087   | 0.590 / 0.475 / 0.510 / 0.095     |
+| v9r regional image as vision input  | 0.255 / 0.280 / 0.372 / 0.122   | 0.608 / 0.478 / 0.530 / 0.139     |
+| v9t reach + regional fourth tower   | 0.223 / 0.225 / 0.321 / 0.097   | 0.535 / 0.415 / 0.452 / 0.103     |
+
+Regional-as-vision: small consistent BFI gain (+0.04, seed sd ≤ 0.02), rest within noise. The
+fourth-tower layout hurts on every signature. Not a breakthrough; the extra imagery is kept
+as an asset, not adopted as the default.
+
+External review (another model, 2026-10-11; see `EMBEDDING_REVIEW_BRIEF.md`) — verified:
+- The fixed ridge α=10 on unit-normalized banks over-regularizes and hid signal. Fleet v8ctl
+  seed 42: 0.47/0.46/0.25/0.18 → **0.69/0.61/0.68/0.29** with nested-CV α (reproduced). All
+  probe tables above understate absolute R²; comparisons across representations with
+  different feature covariance are not neutral at fixed α. Nested α becomes the standard.
+- `KeyBlockedBatchSampler` draws its rotation offset from [0, batch_size) and drops the short
+  last block, so sites near the end of the sorted order are systematically under-trained
+  (109–300 epochs of exposure at 206 sites / batch 128). FF bug; fix with a uniform offset
+  over the cohort plus a coverage test.
+- `embedding_modality_analysis.py` does not restore `regional`/`vision_source`/`embedding_dim`
+  from the training summary (the v8 control analysis ran on 553 of its 555 sites with
+  recomputed static statistics); attribution must assert reconstructed bank == saved bank.
+- Statics-only ridge (coordinates/ids and BFI_AVE/RUNAVE7100/WB5100 excluded) scores
+  0.78/0.54/0.79/0.31 fleet-wide — ahead of the fused bank on size and seasonality. The
+  embedding must be judged on held-out basins / downstream use, not in-sample probes.
+- Per-site log standardization discards log spread (relative variability); ablation: add the
+  discarded log σ as an input channel.
+Not yet acted on: nested-α default, sampler fix, reconstruction assertions, statics baseline
+in the standing eval, held-out-basin split, log-σ ablation, forecasting-teacher objective.

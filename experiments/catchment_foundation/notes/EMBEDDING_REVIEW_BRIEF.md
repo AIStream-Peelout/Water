@@ -92,7 +92,8 @@ batch 64 or 128, trained from scratch on Apple MPS (fleet run ≈ 1 h at batch 1
 | v8ctl (linear head, batch 128, fleet) | | **0.40** | **0.30** | 0.26 | 0.11 | best fleet bank; fleet-wide 0.48/0.45/0.27/0.21 |
 | v8 (v8ctl + regional image as 4th tower) | | 0.33 | 0.27 | 0.26 | 0.12 | 4th tower dilutes the code |
 | v9w (CO/UT-only training, batch 128, linear; width 256/384/512) | | 0.34/0.31/0.33 | 0.34 | **0.44** | 0.15/0.13/0.13 | width flat; **region-only training beats fleet on its own region** |
-| v9c/v9r/v9t (batch 64, width 512: control / regional image as THE vision input / 4-tower) | running 2026-10-11 | | | | | results pending |
+| v9c/v9r/v9t (batch 64, width 512: control / regional image as THE vision input / 4-tower) | fixed α=10 | 0.27/0.26/0.22 | 0.27/0.28/0.23 | 0.38/0.37/0.32 | 0.09/0.12/0.10 | regional-as-vision: small BFI gain only; 4th tower hurts |
+| same, nested-CV ridge α (see addendum) | | 0.59/0.61/0.54 | 0.48/0.48/0.42 | 0.51/0.53/0.45 | 0.10/0.14/0.10 | same reading at the corrected scale |
 
 Other established facts:
 - The calibrated-GR4-parameter probe is ≈ 0 because the targets are not identifiable:
@@ -170,3 +171,17 @@ regional image as the sole vision input.
   full config. Probe JSONs in `experiments/catchment_foundation/calibration/`.
 - FF PRs: #916 (train the fusion; modality dropout), #917 (regional tower; loader policies;
   workers; float16 transit; regional as vision source), #918 (linear head, now default).
+
+## Addendum (2026-10-11, after an external review)
+
+Verified from the review: (1) the fixed ridge α=10 over-regularized unit-normalized banks —
+fleet v8ctl seed 42 reads 0.69/0.61/0.68/0.29 (size/flash/melt/BFI) with nested-CV α versus
+0.47/0.46/0.25/0.18 at α=10, so every table above understates absolute R² and the "≈0.4
+ceiling" in §7 is withdrawn; (2) the blocked batch sampler under-exposes sites near the end of
+the sorted order (offset drawn from [0, batch_size), short last block dropped); (3) the
+attribution script does not restore all training-time options and must assert bank equality;
+(4) a statics-only ridge baseline (0.78/0.54/0.79/0.31 fleet-wide) beats the fused bank on
+size and seasonality in-sample; (5) per-site log standardization discards relative
+variability. Agreed next order: repair measurement (nested α, baselines, reconstruction
+checks), fix the sampler, freeze a held-out-basin split, then decide on a forcing-conditioned
+forecasting-teacher objective with an image+statics student.
