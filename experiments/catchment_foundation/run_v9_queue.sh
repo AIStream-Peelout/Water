@@ -22,7 +22,9 @@
 #                  always use 2 — every prefetched regional batch is ~0.8 GB of shared memory
 #   MEM_BUDGET_GB  stop the queue if the running training's footprint exceeds this (default 20)
 #   MPS_WATERMARK  PYTORCH_MPS_HIGH_WATERMARK_RATIO for MPS runs (default 0.45; the PyTorch
-#                  default lets the Metal cache grow far beyond what the model needs)
+#                  default 1.7 lets the Metal cache grow far beyond what the model needs). The
+#                  low watermark is set to two thirds of it — PyTorch requires low <= high
+#                  and its default low (1.4) would otherwise make any cap below 1.4 invalid.
 set -uo pipefail
 
 : "${FF_REPO:?set FF_REPO to the flow-forecast checkout (branch linear-fusion)}"
@@ -34,6 +36,7 @@ SEEDS=${SEEDS:-"42 43 44"}
 NUM_WORKERS=${NUM_WORKERS:-4}
 MEM_BUDGET_GB=${MEM_BUDGET_GB:-20}
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=${MPS_WATERMARK:-0.45}
+export PYTORCH_MPS_LOW_WATERMARK_RATIO=$(awk -v h="$PYTORCH_MPS_HIGH_WATERMARK_RATIO" 'BEGIN {printf "%.2f", h * 2 / 3}')
 
 stamp() { echo "[$(date '+%F %T')] $*"; }
 
@@ -68,6 +71,10 @@ train() {  # name seed workers extra-args...
   done
   wait "$pid"; local status=$?
   stamp "end $name (exit $status, last: $(tail -1 "$ROOT/train_${name#COUT_}.log"))"
+  if [ "$status" -ne 0 ]; then
+    stamp "RUN FAILED: $name — stopping the queue (fix, then rerun; finished runs are skipped)"
+    exit 2
+  fi
   return 0
 }
 
