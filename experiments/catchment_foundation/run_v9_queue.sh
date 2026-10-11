@@ -3,9 +3,12 @@
 # across machines (MacBook, Mac Studio, a CUDA box). Runs ONE training at a time, skips runs
 # that already have a bank, and stops itself if its own memory footprint passes a budget.
 #
-#   v9w{256,384,512}  embedding-width sweep, no regional imagery           (~12 min/run on MPS)
-#   v9r               regional 25.6 km patch as the vision input, dim 512  (~2 h/run on MPS)
-#   v9t               reach patch + regional fourth tower, dim 512         (~2 h/run on MPS)
+#   v9w{256,384,512}  embedding-width sweep, no regional imagery, batch 128   (~8 min/run on MPS)
+#   v9c               control for the high-res runs: dim 512, no regional, REGIONAL_BATCH
+#   v9r               regional 25.6 km patch as the vision input, dim 512     (~2 h/run on MPS)
+#   v9t               reach patch + regional fourth tower, dim 512            (~2 h/run on MPS)
+#   The high-res groups (c, r, t) use REGIONAL_BATCH (default 64): at batch 128 two 512 px
+#   views need > 12.6 GB of MPS memory, more than fits under a 20 GB machine budget.
 #
 # Usage (from the Water repo root, on the machine that should do the work):
 #   FF_REPO=/path/to/flow-forecast-worktree PY=/path/to/python \
@@ -16,7 +19,8 @@
 #   PY             python with torch + flood_forecast deps (default: python3)
 #   DEVICE         torch device: mps | cuda | cpu (default: the train script's own default)
 #   ROOT           panel-record root (default: pilot_data/embedding_dataset_hourly_pre2022)
-#   RUN_GROUPS     which groups to run, space separated (default: "w256 w384 w512 r t")
+#   RUN_GROUPS     which groups to run, space separated (default: "w256 w384 w512 c r t")
+#   REGIONAL_BATCH batch size for the c/r/t groups (default 64)
 #   SEEDS          seeds (default: "42 43 44")
 #   NUM_WORKERS    DataLoader workers for the no-regional runs (default 4); regional runs
 #                  always use 2 — every prefetched regional batch is ~0.8 GB of shared memory
@@ -31,8 +35,9 @@ set -uo pipefail
 export FF_REPO
 PY=${PY:-python3}
 ROOT=${ROOT:-pilot_data/embedding_dataset_hourly_pre2022}
-GROUPS_TO_RUN=${RUN_GROUPS:-"w256 w384 w512 r t"}
+GROUPS_TO_RUN=${RUN_GROUPS:-"w256 w384 w512 c r t"}
 SEEDS=${SEEDS:-"42 43 44"}
+REGIONAL_BATCH=${REGIONAL_BATCH:-64}
 NUM_WORKERS=${NUM_WORKERS:-4}
 MEM_BUDGET_GB=${MEM_BUDGET_GB:-20}
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=${MPS_WATERMARK:-0.45}
@@ -50,13 +55,13 @@ footprint_gb() {  # total footprint in GB of a pid and its children (macOS); 0 e
   awk -v t="$total" 'BEGIN {printf "%.1f", t/1024}'
 }
 
-train() {  # name seed workers extra-args...
-  local name=$1 seed=$2 workers=$3; shift 3
+train() {  # name seed workers batch extra-args...
+  local name=$1 seed=$2 workers=$3 batch=$4; shift 4
   if [ -f "$ROOT/$name/embeddings_concat.pt" ]; then stamp "$name already trained, skipping"; return 0; fi
-  stamp "start $name"
+  stamp "start $name (batch $batch)"
   $PY -u train_catchment_embeddings.py --states CO UT --data-root "$ROOT" \
       --scrape-root pilot_data/scrapes --output-dir "$ROOT/$name" --fusions concat \
-      --epochs 300 --seed "$seed" --batch-size 128 --num-workers "$workers" \
+      --epochs 300 --seed "$seed" --batch-size "$batch" --num-workers "$workers" \
       --history-mode hourly_panel --cross-year --blocked-batches --no-wandb \
       ${DEVICE:+--device "$DEVICE"} "$@" > "$ROOT/train_${name#COUT_}.log" 2>&1 &
   local pid=$! used
@@ -82,9 +87,10 @@ stamp "v9 queue on $(hostname): groups [$GROUPS_TO_RUN], seeds [$SEEDS], budget 
 for group in $GROUPS_TO_RUN; do
   for seed in $SEEDS; do
     case $group in
-      w256|w384|w512) train "COUT_v9${group}_s$seed" "$seed" "$NUM_WORKERS" --embedding-dim "${group#w}" --no-regional ;;
-      r) train "COUT_v9r_s$seed" "$seed" 2 --embedding-dim 512 --vision-source regional ;;
-      t) train "COUT_v9t_s$seed" "$seed" 2 --embedding-dim 512 ;;
+      w256|w384|w512) train "COUT_v9${group}_s$seed" "$seed" "$NUM_WORKERS" 128 --embedding-dim "${group#w}" --no-regional ;;
+      c) train "COUT_v9c_s$seed" "$seed" "$NUM_WORKERS" "$REGIONAL_BATCH" --embedding-dim 512 --no-regional ;;
+      r) train "COUT_v9r_s$seed" "$seed" 2 "$REGIONAL_BATCH" --embedding-dim 512 --vision-source regional ;;
+      t) train "COUT_v9t_s$seed" "$seed" 2 "$REGIONAL_BATCH" --embedding-dim 512 ;;
       *) stamp "unknown group $group" ;;
     esac
   done

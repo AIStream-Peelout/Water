@@ -414,3 +414,24 @@ To run on another machine (e.g. the Mac Studio):
 4. Copy the resulting `COUT_v9*/` directories back; probes and attribution run locally since
    they need the hourly scrape CSVs.
 Expected on Apple silicon: width-sweep runs ~12 min each, regional runs ~2 h each.
+
+### 10b. Width sweep (2026-10-11): widening the fused code does not help
+
+CO/UT, batch 128, linear head, no regional imagery, 3 seeds each, same 206 sites, fused bank R²:
+
+| embedding_dim | size  | flash | melt  | BFI   | cv    | diurnal |
+|---------------|-------|-------|-------|-------|-------|---------|
+| 256           | 0.344 | 0.341 | 0.443 | 0.150 | 0.145 | 0.172   |
+| 384           | 0.313 | 0.343 | 0.426 | 0.126 | 0.141 | 0.178   |
+| 512           | 0.334 | 0.340 | 0.435 | 0.126 | 0.143 | 0.188   |
+
+Flat within seed noise (slightly worse on size/BFI) → keep 256. The remaining fused-vs-tower-
+concat gap is not a capacity problem.
+
+Side finding: CO/UT-trained banks at this recipe probe melt 0.44 / flashiness 0.34 on the 206
+CO/UT sites, where the fleet-trained v8 control (same recipe, 555 sites) reaches 0.26 / 0.30 on
+the same sites. Region-specific training (and blocked batches among same-region neighbors) beats
+fleet training for a region's own probes — fleet-scale banks pay for breadth with depth.
+
+High-res A/B rerun at batch 64 (`v9c` control at dim 512, `v9r`, `v9t`): at batch 128 the
+regional runs need > 12.6 GB of MPS memory, over the 20 GB machine budget with headroom.
