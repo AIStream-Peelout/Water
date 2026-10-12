@@ -108,16 +108,30 @@ def build_signature_table(site_ids: List[str], scrape_roots: Dict[str, str]
     return pd.DataFrame(rows).set_index("site_id"), kept
 
 
-def ridge_probe_r2(features: np.ndarray, table: pd.DataFrame, alpha: float = 10.0,
+ALPHA_GRID = np.logspace(-5, 4, 19)
+# GAGES-II columns excluded from the statics-only baseline: coordinates and identifiers
+# (not physical descriptors) and fields that are themselves estimates derived from gauged
+# streamflow (BFI_AVE, RUNAVE7100, water-balance runoff), which would leak the probe targets.
+STATICS_BASELINE_EXCLUDE = ("LAT_GAGE", "LNG_GAGE", "FIPS_SITE", "BOUND_SOURCE", "REACHCODE",
+                            "BFI_AVE", "RUNAVE7100", "WB5100_")
+
+
+def ridge_probe_r2(features: np.ndarray, table: pd.DataFrame, alpha: Optional[float] = None,
                    n_folds: int = 5, seed: int = 42) -> Dict[str, float]:
     """
     Cross-validated ridge R-squared from a feature matrix to every signature column.
+
+    With ``alpha=None`` (default) the penalty is selected per target INSIDE each outer
+    training fold by leave-one-out CV over :data:`ALPHA_GRID`, so the outer test fold never
+    informs it. A fixed penalty is not a neutral comparison across representations whose
+    feature covariance differs: on L2-normalized 256-d banks alpha=10 (the former default)
+    hid roughly a third of the readable signal.
 
     :param features: Feature matrix of shape (n_sites, n_features), row-aligned with ``table``.
     :type features: np.ndarray
     :param table: Signature table (one column per signature).
     :type table: pd.DataFrame
-    :param alpha: Ridge regularization, defaults to 10.0.
+    :param alpha: Fixed ridge penalty, or None for nested per-target selection (default).
     :type alpha: float, optional
     :param n_folds: Number of CV folds, defaults to 5.
     :type n_folds: int, optional
@@ -126,7 +140,7 @@ def ridge_probe_r2(features: np.ndarray, table: pd.DataFrame, alpha: float = 10.
     :return: Signature name -> out-of-fold R-squared.
     :rtype: Dict[str, float]
     """
-    from sklearn.linear_model import Ridge
+    from sklearn.linear_model import Ridge, RidgeCV
     from sklearn.model_selection import KFold
 
     folds = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
@@ -137,13 +151,87 @@ def ridge_probe_r2(features: np.ndarray, table: pd.DataFrame, alpha: float = 10.
         matrix = features[finite]
         predictions = np.zeros_like(target)
         for train_index, test_index in folds.split(matrix):
-            model = Ridge(alpha=alpha)
+            model = RidgeCV(alphas=ALPHA_GRID) if alpha is None else Ridge(alpha=alpha)
             model.fit(matrix[train_index], target[train_index])
             predictions[test_index] = model.predict(matrix[test_index])
         residual = float(((predictions - target) ** 2).sum())
         variance = float(((target - target.mean()) ** 2).sum())
         probe_r2[signature] = round(1.0 - residual / max(variance, 1e-12), 3)
     return probe_r2
+
+
+def load_statics(records_dir: str, site_ids: List[str]) -> Tuple[np.ndarray, List[str]]:
+    """
+    Loads the GAGES-II static vectors of the given sites from their panel/embedding records.
+
+    :param records_dir: Directory of <site>.npz records (e.g. a bank's combined_records).
+    :type records_dir: str
+    :param site_ids: Site ids in the desired row order.
+    :type site_ids: List[str]
+    :return: (matrix of shape (n_sites, n_statics), attribute names).
+    :rtype: Tuple[np.ndarray, List[str]]
+    """
+    rows, names = [], None
+    for site in site_ids:
+        with np.load(os.path.join(records_dir, site + ".npz"), allow_pickle=True) as record:
+            rows.append(record["static"].astype(np.float64))
+            if names is None:
+                names = [str(n) for n in record["static_names"]]
+    return np.stack(rows), names
+
+
+def statics_baseline_r2(records_dir: str, site_ids: List[str], table: pd.DataFrame,
+                        alpha: Optional[float] = None, n_folds: int = 5, seed: int = 42
+                        ) -> Dict[str, float]:
+    """
+    Ridge probe from physical GAGES-II statics alone — the baseline any embedding must beat.
+
+    Columns in :data:`STATICS_BASELINE_EXCLUDE` are dropped; imputation (training-fold medians)
+    and standardization are fitted inside each outer fold.
+
+    :param records_dir: Directory of <site>.npz records holding ``static``/``static_names``.
+    :type records_dir: str
+    :param site_ids: Site ids, row-aligned with ``table`` after filtering to its index.
+    :type site_ids: List[str]
+    :param table: Signature table indexed by site_id.
+    :type table: pd.DataFrame
+    :param alpha: Fixed ridge penalty, or None for nested selection (default).
+    :type alpha: float, optional
+    :param n_folds: Number of CV folds, defaults to 5.
+    :type n_folds: int, optional
+    :param seed: Fold shuffling seed, defaults to 42.
+    :type seed: int, optional
+    :return: Signature name -> out-of-fold R-squared.
+    :rtype: Dict[str, float]
+    """
+    from sklearn.linear_model import Ridge, RidgeCV
+    from sklearn.model_selection import KFold
+
+    matrix, names = load_statics(records_dir, list(table.index))
+    keep = [i for i, name in enumerate(names)
+            if not any(name.startswith(prefix) for prefix in STATICS_BASELINE_EXCLUDE)]
+    matrix = matrix[:, keep]
+    folds = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    result = {}
+    for signature in table.columns:
+        finite = np.isfinite(table[signature].to_numpy())
+        target = table[signature].to_numpy()[finite]
+        x = matrix[finite]
+        predictions = np.zeros_like(target)
+        for train_index, test_index in folds.split(x):
+            medians = np.nanmedian(x[train_index], axis=0)
+            medians = np.where(np.isfinite(medians), medians, 0.0)
+            train = np.where(np.isfinite(x[train_index]), x[train_index], medians)
+            test = np.where(np.isfinite(x[test_index]), x[test_index], medians)
+            mean, std = train.mean(axis=0), train.std(axis=0)
+            std[std == 0] = 1.0
+            model = RidgeCV(alphas=ALPHA_GRID) if alpha is None else Ridge(alpha=alpha)
+            model.fit((train - mean) / std, target[train_index])
+            predictions[test_index] = model.predict((test - mean) / std)
+        residual = float(((predictions - target) ** 2).sum())
+        variance = float(((target - target.mean()) ** 2).sum())
+        result[signature] = round(1.0 - residual / max(variance, 1e-12), 3)
+    return result
 
 
 def tercile_probe_accuracy(features: np.ndarray, table: pd.DataFrame, n_folds: int = 5,
@@ -199,7 +287,13 @@ def main() -> None:
         default=os.path.join(WATER_ROOT, "pilot_data", "scrapes"))
     parser.add_argument("--states", nargs="+", default=["CO", "UT"])
     parser.add_argument("--output", required=True)
-    parser.add_argument("--alpha", type=float, default=10.0, help="Ridge regularization")
+    parser.add_argument("--alpha", type=float, default=None,
+                        help="Fixed ridge penalty; default: nested per-target selection "
+                             "(leave-one-out CV inside each training fold)")
+    parser.add_argument("--records-dir", default=None,
+                        help="Directory of <site>.npz records (e.g. the bank's "
+                             "combined_records); when given, a physical-statics-only ridge "
+                             "baseline is reported alongside the embedding probe")
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -216,10 +310,15 @@ def main() -> None:
                               seed=args.seed)
     tercile_accuracy = tercile_probe_accuracy(features, table, n_folds=args.n_folds,
                                               seed=args.seed)
-    report = {"n_sites": len(table), "alpha": args.alpha, "probe_r2": probe_r2,
-              "tercile_accuracy": tercile_accuracy,
+    report = {"n_sites": len(table), "alpha": args.alpha if args.alpha is not None else "nested",
+              "probe_r2": probe_r2, "tercile_accuracy": tercile_accuracy,
               "signature_medians": {c: round(float(table[c].median()), 3)
                                     for c in table.columns}}
+    if args.records_dir:
+        report["statics_baseline_r2"] = statics_baseline_r2(
+            args.records_dir, list(bank["site_ids"]), table, alpha=args.alpha,
+            n_folds=args.n_folds, seed=args.seed)
+        print("statics-only baseline:", json.dumps(report["statics_baseline_r2"]))
     table.to_csv(args.output.replace(".json", "_signatures.csv"))
     with open(args.output, "w") as f:
         json.dump(report, f, indent=2)
