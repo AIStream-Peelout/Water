@@ -234,6 +234,85 @@ def statics_baseline_r2(records_dir: str, site_ids: List[str], table: pd.DataFra
     return result
 
 
+def holdout_probe_r2(features: np.ndarray, table: pd.DataFrame, holdout: np.ndarray,
+                     alpha: Optional[float] = None) -> Dict[str, float]:
+    """
+    Ridge probe fitted on training basins and scored on held-out basins.
+
+    The encoder never trained on the held-out basins (see ``train_catchment_embeddings.py
+    --split/--holdout-fold``); the ridge (and its nested penalty) is fitted on the training
+    basins' embeddings only, so this measures what the representation carries to unseen
+    basins — the paper's question. In-sample CV on the training basins is NOT reported here.
+
+    :param features: Feature matrix of shape (n_sites, n_features), row-aligned with ``table``.
+    :type features: np.ndarray
+    :param table: Signature table (one column per signature).
+    :type table: pd.DataFrame
+    :param holdout: Boolean mask of held-out rows.
+    :type holdout: np.ndarray
+    :param alpha: Fixed ridge penalty, or None for selection on the training basins.
+    :type alpha: float, optional
+    :return: Signature name -> R-squared on the held-out basins.
+    :rtype: Dict[str, float]
+    """
+    from sklearn.linear_model import Ridge, RidgeCV
+
+    result = {}
+    for signature in table.columns:
+        finite = np.isfinite(table[signature].to_numpy())
+        train, test = finite & ~holdout, finite & holdout
+        target = table[signature].to_numpy()
+        model = RidgeCV(alphas=ALPHA_GRID) if alpha is None else Ridge(alpha=alpha)
+        model.fit(features[train], target[train])
+        predictions = model.predict(features[test])
+        residual = float(((predictions - target[test]) ** 2).sum())
+        variance = float(((target[test] - target[test].mean()) ** 2).sum())
+        result[signature] = round(1.0 - residual / max(variance, 1e-12), 3)
+    return result
+
+
+def holdout_statics_baseline_r2(records_dir: str, table: pd.DataFrame, holdout: np.ndarray,
+                                alpha: Optional[float] = None) -> Dict[str, float]:
+    """
+    Physical-statics ridge fitted on training basins, scored on held-out basins.
+
+    :param records_dir: Directory of <site>.npz records holding ``static``/``static_names``.
+    :type records_dir: str
+    :param table: Signature table indexed by site_id.
+    :type table: pd.DataFrame
+    :param holdout: Boolean mask of held-out rows.
+    :type holdout: np.ndarray
+    :param alpha: Fixed ridge penalty, or None for selection on the training basins.
+    :type alpha: float, optional
+    :return: Signature name -> R-squared on the held-out basins.
+    :rtype: Dict[str, float]
+    """
+    from sklearn.linear_model import Ridge, RidgeCV
+
+    matrix, names = load_statics(records_dir, list(table.index))
+    keep = [i for i, name in enumerate(names)
+            if not any(name.startswith(prefix) for prefix in STATICS_BASELINE_EXCLUDE)]
+    matrix = matrix[:, keep]
+    result = {}
+    for signature in table.columns:
+        finite = np.isfinite(table[signature].to_numpy())
+        train, test = finite & ~holdout, finite & holdout
+        target = table[signature].to_numpy()
+        medians = np.nanmedian(matrix[train], axis=0)
+        medians = np.where(np.isfinite(medians), medians, 0.0)
+        x_train = np.where(np.isfinite(matrix[train]), matrix[train], medians)
+        x_test = np.where(np.isfinite(matrix[test]), matrix[test], medians)
+        mean, std = x_train.mean(axis=0), x_train.std(axis=0)
+        std[std == 0] = 1.0
+        model = RidgeCV(alphas=ALPHA_GRID) if alpha is None else Ridge(alpha=alpha)
+        model.fit((x_train - mean) / std, target[train])
+        predictions = model.predict((x_test - mean) / std)
+        residual = float(((predictions - target[test]) ** 2).sum())
+        variance = float(((target[test] - target[test].mean()) ** 2).sum())
+        result[signature] = round(1.0 - residual / max(variance, 1e-12), 3)
+    return result
+
+
 def tercile_probe_accuracy(features: np.ndarray, table: pd.DataFrame, n_folds: int = 5,
                            seed: int = 42) -> Dict[str, Dict[str, float]]:
     """
@@ -319,6 +398,21 @@ def main() -> None:
             args.records_dir, list(bank["site_ids"]), table, alpha=args.alpha,
             n_folds=args.n_folds, seed=args.seed)
         print("statics-only baseline:", json.dumps(report["statics_baseline_r2"]))
+    holdout_sites = set(bank.get("holdout_sites") or [])
+    if holdout_sites:
+        # Banks trained with --split/--holdout-*: the headline is the held-out-basin score.
+        mask = np.array([site in holdout_sites for site in table.index])
+        report["holdout"] = {"n_holdout": int(mask.sum()), "n_train": int((~mask).sum()),
+                             "probe_r2": holdout_probe_r2(features, table, mask,
+                                                          alpha=args.alpha)}
+        if args.records_dir:
+            report["holdout"]["statics_baseline_r2"] = holdout_statics_baseline_r2(
+                args.records_dir, table, mask, alpha=args.alpha)
+        print("HELD-OUT BASINS (%d of %d): embedding %s" % (
+            mask.sum(), len(table), json.dumps(report["holdout"]["probe_r2"])))
+        if args.records_dir:
+            print("HELD-OUT BASINS: statics baseline %s"
+                  % json.dumps(report["holdout"]["statics_baseline_r2"]))
     table.to_csv(args.output.replace(".json", "_signatures.csv"))
     with open(args.output, "w") as f:
         json.dump(report, f, indent=2)

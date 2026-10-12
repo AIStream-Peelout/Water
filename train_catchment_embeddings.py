@@ -119,6 +119,13 @@ def main() -> None:
     parser.add_argument("--vision-patch-size", type=int, default=None,
                         help="ViT patch size of the vision tower (default 16 for reach, 32 for "
                              "regional)")
+    parser.add_argument("--split", default=None,
+                        help="Frozen basin split JSON (experiments/catchment_foundation/splits/"
+                             "basin_split_v1.json); with --holdout-fold or --holdout-state the "
+                             "held-out basins are excluded from training and from the static "
+                             "normalization fit, but still embedded (training-fitted stats)")
+    parser.add_argument("--holdout-fold", type=int, default=None)
+    parser.add_argument("--holdout-state", default=None)
     parser.add_argument("--history-log-std", action="store_true",
                         help="Append the site's log-flow standard deviation as a 7th history "
                              "channel (per-site standardization otherwise discards relative "
@@ -135,6 +142,34 @@ def main() -> None:
     combined_dir = os.path.join(args.output_dir, "combined_records")
     state_dirs = [os.path.join(args.data_root, state) for state in args.states]
     n_records = build_combined_dir(state_dirs, combined_dir)
+    # Held-out basins: training (and the static-normalization fit) see only the training
+    # records, linked into a separate directory; extraction later covers every record.
+    holdout_sites: List[str] = []
+    if args.holdout_fold is not None or args.holdout_state is not None:
+        if not args.split:
+            raise SystemExit("--holdout-fold/--holdout-state need --split")
+        with open(args.split) as handle:
+            split = json.load(handle)["sites"]
+        holdout_sites = sorted(
+            site for site, info in split.items()
+            if ((args.holdout_fold is not None and info["fold"] == args.holdout_fold)
+                or (args.holdout_state is not None and info["state"] == args.holdout_state))
+            and os.path.exists(os.path.join(combined_dir, site + ".npz")))
+        train_dir = os.path.join(args.output_dir, "training_records")
+        os.makedirs(train_dir, exist_ok=True)
+        held = set(holdout_sites)
+        for name in sorted(os.listdir(combined_dir)):
+            if name.endswith(".npz") and name[:-4] not in held:
+                target = os.path.join(train_dir, name)
+                if not os.path.exists(target):
+                    os.symlink(os.path.realpath(os.path.join(combined_dir, name)), target)
+        n_train = len([n for n in os.listdir(train_dir) if n.endswith(".npz")])
+        print("holding out %d basins (%s); training on %d" % (
+            len([s for s in holdout_sites if os.path.exists(os.path.join(combined_dir, s + ".npz"))]),
+            "fold %d" % args.holdout_fold if args.holdout_fold is not None
+            else "state %s" % args.holdout_state, n_train))
+    else:
+        train_dir = combined_dir
     combine_gauges_csv([os.path.join(args.scrape_root, state) for state in args.states],
                        os.path.join(args.output_dir, "gauges.csv"))
     print("linked %d records from %s" % (n_records, ", ".join(args.states)))
@@ -160,12 +195,15 @@ def main() -> None:
                           "vision_source": args.vision_source,
                           "vision_patch_size": args.vision_patch_size,
                           "history_log_std": args.history_log_std,
+                          "split": args.split, "holdout_fold": args.holdout_fold,
+                          "holdout_state": args.holdout_state,
+                          "n_holdout_sites": len(holdout_sites),
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         regional_policy = "ignore" if args.no_regional else "auto"
         if args.vision_source == "regional":
             regional_policy = "require"
-        dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
+        dataset = CatchmentEmbeddingDataset(train_dir, seed=args.seed,
                                             history_mode=args.history_mode,
                                             cross_year_views=args.cross_year,
                                             regional=regional_policy,
@@ -206,19 +244,25 @@ def main() -> None:
         # Extraction uses the deterministic canonical years (no cross-year sampling) but,
         # for cross-year-trained encoders, the seasonal-only members the encoder was trained
         # on: the flood/drought members are out-of-distribution for such encoders.
+        # Extraction covers every record (held-out basins included) with the normalization
+        # statistics fitted on the training records only.
         extract_dataset = CatchmentEmbeddingDataset(combined_dir, seed=args.seed,
                                                     history_mode=args.history_mode,
                                                     seasonal_only=True,
                                                     regional=regional_policy,
                                                     vision_source=args.vision_source,
-                                                    history_log_std_channel=args.history_log_std) \
+                                                    history_log_std_channel=args.history_log_std,
+                                                    static_stats=(dataset.static_mean,
+                                                                  dataset.static_std)) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
                                                   n_history_samples=args.n_history_samples,
                                                   num_workers=args.num_workers)
         torch.save(encoder.state_dict(),
                    os.path.join(args.output_dir, "encoder_%s.pt" % fusion))
-        torch.save({"site_ids": site_ids, "embeddings": embeddings},
+        torch.save({"site_ids": site_ids, "embeddings": embeddings,
+                    "holdout_sites": holdout_sites, "split": args.split,
+                    "static_mean": dataset.static_mean, "static_std": dataset.static_std},
                    os.path.join(args.output_dir, "embeddings_%s.pt" % fusion))
         summary[fusion] = {"first_loss": losses[0], "final_loss": losses[-1],
                            "minutes": round((time.time() - start) / 60.0, 2),
