@@ -119,6 +119,10 @@ def main() -> None:
     parser.add_argument("--vision-patch-size", type=int, default=None,
                         help="ViT patch size of the vision tower (default 16 for reach, 32 for "
                              "regional)")
+    parser.add_argument("--history-log-std", action="store_true",
+                        help="Append the site's log-flow standard deviation as a 7th history "
+                             "channel (per-site standardization otherwise discards relative "
+                             "variability)")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes; records with regional patches "
                              "decompress ~12 MB each per epoch, which serializes without workers")
@@ -155,6 +159,7 @@ def main() -> None:
                           "embedding_dim": args.embedding_dim,
                           "vision_source": args.vision_source,
                           "vision_patch_size": args.vision_patch_size,
+                          "history_log_std": args.history_log_std,
                           "seed": args.seed, "data_root": args.data_root}}
     for fusion in args.fusions:
         regional_policy = "ignore" if args.no_regional else "auto"
@@ -164,7 +169,8 @@ def main() -> None:
                                             history_mode=args.history_mode,
                                             cross_year_views=args.cross_year,
                                             regional=regional_policy,
-                                            vision_source=args.vision_source)
+                                            vision_source=args.vision_source,
+                                            history_log_std_channel=args.history_log_std)
         if dataset.excluded_sites:
             print("excluded %d records without regional patches: %s"
                   % (len(dataset.excluded_sites), ", ".join(dataset.excluded_sites)))
@@ -204,7 +210,8 @@ def main() -> None:
                                                     history_mode=args.history_mode,
                                                     seasonal_only=True,
                                                     regional=regional_policy,
-                                                    vision_source=args.vision_source) \
+                                                    vision_source=args.vision_source,
+                                                    history_log_std_channel=args.history_log_std) \
             if args.cross_year else dataset
         site_ids, embeddings = extract_embeddings(encoder, extract_dataset, device=args.device,
                                                   n_history_samples=args.n_history_samples,
