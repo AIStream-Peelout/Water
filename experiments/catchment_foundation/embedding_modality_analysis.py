@@ -61,40 +61,70 @@ def seasonal_members(history: torch.Tensor) -> torch.Tensor:
     return history[keep].reshape(history.shape[0], n_keep, *history.shape[2:])
 
 
+def alt_history_views(dataset, alt_dataset, indices: List[int]) -> torch.Tensor:
+    """
+    Builds other-year seasonal history views that avoid the CANONICAL view's slices.
+
+    A cross-year dataset's own "history_alt" avoids the random "history" draw it made for
+    the same item, not the canonical (coverage-best) view the encoder was extracted from, so
+    pairing those two can compare identical seasons. Here the alternate view is drawn to
+    avoid exactly the canonical rows.
+
+    :param dataset: The canonical dataset (cross_year_views=False).
+    :type dataset: CatchmentEmbeddingDataset
+    :param alt_dataset: A cross-year dataset over the same records (seeded sampler).
+    :type alt_dataset: CatchmentEmbeddingDataset
+    :param indices: Dataset indices of the batch.
+    :type indices: List[int]
+    :return: Alternate history views of shape (batch, n_members, member_len, channels).
+    :rtype: torch.Tensor
+    """
+    views = []
+    for index in indices:
+        record = np.load(os.path.join(dataset.data_dir, dataset.site_ids[index] + ".npz"))
+        types = [str(t) for t in record["panel_types"]]
+        canonical = dataset._choose_panel_rows(types)
+        alt, _ = alt_dataset._panel_history(record, avoid=canonical)
+        views.append(torch.from_numpy(alt))
+    return torch.stack(views)
+
+
 @torch.no_grad()
 def encode_towers(encoder, dataset, device: str, batch_size: int = 32,
-                  seasonal_only: bool = False, alt_dataset=None) -> Dict[str, torch.Tensor]:
+                  alt_dataset=None) -> Dict[str, torch.Tensor]:
     """
     Runs every site through the encoder, keeping per-tower pooled features and projections.
 
+    The dataset must already be configured exactly as at extraction time (seasonal-only
+    members, regional policy, vision source, history channels); see :func:`main`, which
+    rebuilds it from the run's ``training_summary.json`` and asserts the fused output
+    matches the saved bank.
+
     :param encoder: The trained CatchmentEncoder (eval mode).
     :type encoder: CatchmentEncoder
-    :param dataset: The canonical-panel embedding dataset (extraction view).
+    :param dataset: The extraction-view embedding dataset.
     :type dataset: CatchmentEmbeddingDataset
     :param device: Torch device string.
     :type device: str
     :param batch_size: Inference batch size, defaults to 32.
     :type batch_size: int, optional
-    :param seasonal_only: Drop the flood/drought members from the canonical history so the
-        extraction view matches the seasonal-only cross-year training view, defaults to False.
-    :type seasonal_only: bool, optional
-    :param alt_dataset: Optional cross-year dataset (same site order) whose "history_alt" view
-        is encoded for the history->history_alt retrieval test, defaults to None.
+    :param alt_dataset: Optional cross-year dataset over the same records, used to encode an
+        other-year history view for the history->history_alt retrieval test, defaults to None.
     :type alt_dataset: CatchmentEmbeddingDataset, optional
     :return: Dict with "pooled_<m>", "proj_<m>" (contrastive head), "embedding" (fused bank
         output) and optionally "proj_history_alt", each of shape (n_sites, dim), on CPU.
     :rtype: Dict[str, torch.Tensor]
     """
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    alt_iter = iter(torch.utils.data.DataLoader(alt_dataset, batch_size=batch_size,
-                                                shuffle=False)) if alt_dataset else None
     collected: Dict[str, List[torch.Tensor]] = {}
+    transform = dataset.regional_transform if getattr(dataset, "regional_half", False) else None
     for batch in loader:
         inputs = {name: batch[INPUT_KEYS[name]].to(device) for name in encoder.encoders}
-        if seasonal_only:
-            inputs["history"] = seasonal_members(inputs["history"])
-        if "vision_regional" in inputs and getattr(dataset, "regional_half", False):
-            inputs["vision_regional"] = dataset.regional_transform(inputs["vision_regional"])
+        if transform is not None:
+            if "vision_regional" in inputs:
+                inputs["vision_regional"] = transform(inputs["vision_regional"])
+            if getattr(dataset, "vision_source", "reach") == "regional":
+                inputs["vision"] = transform(inputs["vision"])
         # Use the encoder's own tower/pool/fuse path so pooled blocks carry the encoder's
         # normalization and "embedding" is exactly the shipped bank.
         outputs = encoder.encode_towers(inputs)
@@ -103,8 +133,9 @@ def encode_towers(encoder, dataset, device: str, batch_size: int = 32,
         for name in encoder.encoders:
             parts["pooled_" + name] = pooled[name]
             parts["proj_" + name] = encoder.contrastive_heads[name](pooled[name])
-        if alt_iter is not None:
-            alt = encoder.encoders["history"](next(alt_iter)["history_alt"].to(device))
+        if alt_dataset is not None:
+            alt_views = alt_history_views(dataset, alt_dataset, batch["site_index"].tolist())
+            alt = encoder.encoders["history"](alt_views.to(device))
             alt = encoder.pool_towers({"history": alt})["history"]
             parts["proj_history_alt"] = encoder.contrastive_heads["history"](alt)
         for key, value in parts.items():
@@ -212,48 +243,81 @@ def main() -> None:
     parser.add_argument("--device", default="cpu",
                         help="Inference is light; default cpu leaves MPS to training runs")
     parser.add_argument("--seasonal-only", action="store_true",
-                        help="Extract from the 4 seasonal members only (training view) instead "
-                             "of the 6-member canonical panel")
+                        help="Force the 4-member seasonal extraction view (default: whatever "
+                             "the run's training_summary.json recorded)")
+    parser.add_argument("--max-bank-diff", type=float, default=1e-3,
+                        help="Abort unless the reconstructed fused bank matches the saved "
+                             "embeddings_concat.pt within this max absolute difference")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    # Rebuild the extraction-time dataset and encoder from the run's recorded config, then
+    # prove it by matching the saved bank. Attribution of a mismatched reconstruction (wrong
+    # cohort, normalization or options) is meaningless.
     records = os.path.join(args.version_dir, "combined_records")
-    dataset = CatchmentEmbeddingDataset(records, seed=args.seed, history_mode="hourly_panel")
-    alt_dataset = CatchmentEmbeddingDataset(records, seed=args.seed,
-                                            history_mode="hourly_panel", cross_year_views=True)
-    sample = dataset[0]
+    with open(os.path.join(args.version_dir, "training_summary.json")) as handle:
+        summary = json.load(handle)
+    config = summary.get("config", {})
     state = torch.load(os.path.join(args.version_dir, "encoder_%s.pt" % args.fusion),
                        map_location="cpu")
+    has_regional_tower = any(key.startswith("encoders.vision_regional.") for key in state)
+    vision_source = config.get("vision_source", "reach")
+    regional_policy = "require" if vision_source == "regional" else \
+        ("auto" if has_regional_tower else "ignore")
+    seasonal_only = args.seasonal_only or bool(config.get("seasonal_extraction", False))
+    dataset_options = dict(history_mode="hourly_panel", seasonal_only=seasonal_only,
+                           regional=regional_policy, vision_source=vision_source,
+                           history_log_std_channel=bool(config.get("history_log_std", False)))
+    dataset = CatchmentEmbeddingDataset(records, seed=args.seed, **dataset_options)
+    alt_dataset = CatchmentEmbeddingDataset(records, seed=args.seed, cross_year_views=True,
+                                            **dict(dataset_options, seasonal_only=False))
+    sample = dataset[0]
     # Checkpoints from before the fusion was trained have no fused_head and were trained
     # without tower normalization; reproduce their training-time encode exactly.
     trained_fusion = "fused_head.weight" in state
-    # Head type and optional regional tower are read off the checkpoint as well.
-    fusion_head = "mlp" if "projection.3.weight" in state else "linear"
+    fusion_head = config.get("fusion_head") or ("mlp" if "projection.3.weight" in state
+                                                else "linear")
     regional = {}
-    if "encoders.vision_regional.patch_embedding.weight" in state or any(
-            key.startswith("encoders.vision_regional.") for key in state):
+    if has_regional_tower:
         regional = {"regional_image_size": tuple(sample["image_regional"].shape[1:]),
                     "regional_channels": sample["image_regional"].shape[0]}
+    patch_size = config.get("vision_patch_size") or (32 if vision_source == "regional" else 16)
     encoder = CatchmentEncoder(image_size=tuple(sample["image"].shape[1:]),
                                image_channels=sample["image"].shape[0],
                                static_features=dataset.static_features,
                                history_features=sample["history"].shape[-1],
                                history_len=sample["history"].shape[-2],
                                history_mode="panel", fusion=args.fusion,
+                               patch_size=patch_size,
+                               embedding_dim=int(config.get("embedding_dim", 256)),
                                normalize_towers=trained_fusion, fusion_head=fusion_head,
                                **regional)
     encoder.load_state_dict(state, strict=trained_fusion)
     encoder = encoder.to(args.device).eval()
 
-    features = encode_towers(encoder, dataset, args.device, seasonal_only=args.seasonal_only,
-                             alt_dataset=alt_dataset)
+    features = encode_towers(encoder, dataset, args.device, alt_dataset=alt_dataset)
     encoder = encoder.cpu()
     site_ids = list(dataset.site_ids)
+    saved = torch.load(os.path.join(args.version_dir, "embeddings_%s.pt" % args.fusion),
+                       weights_only=False)
+    if list(saved["site_ids"]) != site_ids:
+        raise SystemExit("reconstruction mismatch: %d sites rebuilt vs %d in the saved bank "
+                         "(regional policy %s)" % (len(site_ids), len(saved["site_ids"]),
+                                                   regional_policy))
+    bank_diff = float((features["embedding"] - saved["embeddings"].float()).abs().max())
+    if bank_diff > args.max_bank_diff:
+        raise SystemExit("reconstruction mismatch: fused bank differs from the saved bank by "
+                         "%.2e (> %.0e); dataset/encoder options do not reproduce the run"
+                         % (bank_diff, args.max_bank_diff))
+    print("reconstruction verified: %d sites, max |rebuilt - saved| = %.2e" % (len(site_ids),
+                                                                            bank_diff))
     towers = list(encoder.encoders)
     pooled = {name: features["pooled_" + name] for name in towers}
     report: Dict = {"version_dir": args.version_dir, "n_sites": len(site_ids),
-                    "history_view": "seasonal_only" if args.seasonal_only else "canonical6"}
-    suffix = "_seasonal" if args.seasonal_only else ""
+                    "history_view": "seasonal_only" if seasonal_only else "canonical6",
+                    "reconstruction_max_abs_diff": bank_diff, "dataset_options": dataset_options,
+                    "embedding_dim": int(config.get("embedding_dim", 256))}
+    suffix = "_seasonal" if seasonal_only else ""
 
     report["variance_share_pooled"] = variance_share(pooled)
     report["mean_norm_pooled"] = {name: round(float(feat.norm(dim=-1).mean()), 3)
