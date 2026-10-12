@@ -469,3 +469,48 @@ External review (another model, 2026-10-11; see `EMBEDDING_REVIEW_BRIEF.md`) —
   discarded log σ as an input channel.
 Not yet acted on: nested-α default, sampler fix, reconstruction assertions, statics baseline
 in the standing eval, held-out-basin split, log-σ ablation, forecasting-teacher objective.
+
+## 11. Review-driven repairs (2026-10-12): corrected protocol, sampler fix, log-σ ablation
+
+**Protocol changes (committed).** `embedding_probes.py` now selects the ridge penalty per
+target inside each outer training fold (nested RidgeCV; `--alpha` keeps a fixed value) and
+reports a physical-statics-only baseline (`--records-dir`; coordinates/identifiers and the
+streamflow-derived BFI_AVE/RUNAVE7100/WB5100 fields excluded, imputation/scaling per fold).
+`embedding_modality_analysis.py` rebuilds dataset + encoder from `training_summary.json` and
+aborts unless the rebuilt fused bank matches the saved one (measured 3.8e-6 / 2.4e-6).
+`reprobe_milestones.py` re-probes every milestone under the one protocol.
+
+**FF fixes (PR #919, `sampler-coverage-and-history-stats`, base `linear-fusion`).**
+`KeyBlockedBatchSampler`: uniform rotation over the cohort and circular completion of the
+short last block (every site every epoch; replay showed 109/300 epochs minimum exposure
+before). `CatchmentEmbeddingDataset(history_log_std_channel=True)`: 7th history channel = the
+site's log-flow σ that per-site standardization discards.
+
+**Every milestone, corrected protocol** (nested α; seed means; `calibration/reprobe_milestones.json`):
+
+| configuration (fleet probe set, 555 sites)   | size  | flash | melt  | BFI   |
+|----------------------------------------------|-------|-------|-------|-------|
+| statics-only baseline (physical GAGES-II)    | 0.777 | 0.539 | 0.791 | 0.308 |
+| v5  fleet, untrained fusion, b64             | 0.360 | 0.387 | 0.404 | 0.159 |
+| v7  fleet, modality dropout, MLP head, b64   | 0.491 | 0.441 | 0.440 | 0.240 |
+| v8ctl fleet, linear head, b128               | 0.692 | 0.592 | 0.701 | 0.302 |
+
+| configuration (fixed 206 CO/UT sites)        | size  | flash | melt  | BFI   |
+|----------------------------------------------|-------|-------|-------|-------|
+| statics-only baseline (physical GAGES-II)    | 0.597 | 0.428 | 0.014 | −0.439 |
+| v4c COUT 206, untrained fusion, b64          | 0.300 | 0.326 | 0.374 | 0.056 |
+| v8ctl fleet, linear head, b128               | 0.587 | 0.452 | 0.391 | 0.127 |
+| v9w256 COUT, linear, b128                    | 0.580 | 0.502 | 0.535 | 0.187 |
+| v9r COUT, regional image as vision input     | 0.608 | 0.478 | 0.530 | 0.140 |
+| **v9s COUT, + site log-σ channel**           | 0.557 | 0.494 | **0.676** | **0.404** |
+
+Readings: (1) absolute R² is far higher than the α=10 tables suggested and progress across
+versions is monotonic; (2) fleet-wide, physical statics alone beat the best bank on size and
+melt — the embedding only wins on flashiness there; (3) within CO/UT the statics baseline
+collapses (melt 0.01, BFI −0.44) while the banks read melt 0.5–0.7: the embedding's value is
+within-region regime structure, which between-state variance masks fleet-wide; (4) regional
+training's edge over fleet training on CO/UT survives the corrected protocol (melt 0.535 vs
+0.391) at reduced size; (5) the **log-σ channel** is the largest single input effect yet
+(melt +0.14, BFI +0.22, seed sd ≤ 0.02; size/flash/CV flat). Caveat being closed: the v9s runs
+also used the fixed sampler while v9w256 used the old one; `COUT_v9f_*` (6 channels, fixed
+sampler) isolates the channel's effect.
