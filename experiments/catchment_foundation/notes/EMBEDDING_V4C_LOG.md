@@ -514,3 +514,24 @@ training's edge over fleet training on CO/UT survives the corrected protocol (me
 (melt +0.14, BFI +0.22, seed sd ≤ 0.02; size/flash/CV flat). Caveat being closed: the v9s runs
 also used the fixed sampler while v9w256 used the old one; `COUT_v9f_*` (6 channels, fixed
 sampler) isolates the channel's effect.
+
+### 11a. Log-σ effect isolated from the sampler fix (2026-10-12)
+
+Same 206 CO/UT sites, batch 128, linear head, dim 256, nested-α ridge, 3-seed means:
+
+| configuration                              | size  | flash | melt  | BFI   | cv    | diurnal |
+|--------------------------------------------|-------|-------|-------|-------|-------|---------|
+| old sampler, 6 channels (v9w256)           | 0.580 | 0.502 | 0.535 | 0.187 | 0.199 | 0.226   |
+| fixed sampler, 6 channels (v9f)            | 0.526 | 0.474 | 0.481 | 0.156 | 0.186 | 0.227   |
+| fixed sampler, 6 + log-σ channel (v9s)     | 0.557 | 0.494 | **0.676** | **0.404** | 0.185 | 0.236 |
+
+Against the matched control the log-σ channel adds melt **+0.20** and BFI **+0.25** (seed sd
+≤ 0.02) with size/flashiness/CV flat: the reviewer's information-loss mechanism is confirmed
+on real data, and the channel becomes part of the recipe. The sampler fix by itself lowers
+these in-sample probes slightly (−0.03 to −0.05; fair exposure is still correct — the old
+sampler's biased, repetitive batch compositions were a quirk, not a feature — but it is a
+reminder that in-sample probes reward whatever the training distribution over-represented).
+
+Closed from the review's list: nested-α probes, statics baselines, reconstruction assertions,
+milestone re-report, sampler fix with coverage test, log-σ ablation. Still open (need a
+decision): frozen held-out-basin split; forcing-conditioned teacher / image+statics student.
