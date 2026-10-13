@@ -576,3 +576,28 @@ is exactly why this split was needed; (3) single seed, one fold: the full protoc
 3 seeds (≈ 15 h sequential on the MacBook). Note the held-out embedding still uses the basin's
 own flow history ("gauged but unseen"); the ungauged (image + statics only) case is a separate,
 harder evaluation that the forecasting-teacher design would target.
+
+## 13. What the embedding space looks like (2026-10-13)
+
+`embedding_cluster_analysis.py` on `FLEET_v10_f0_s42` (555 gauges; figure
+`calibration/clusters_FLEET_v10_f0_s42.png`, JSON alongside). k-means (k=6) clusters are NOT
+hydrologically distinct: every cluster mixes all five states and their mean signatures sit in a
+narrow band (melt 0.35–0.52, flashiness 0.13–0.25, BFI 0.56–0.69); only a PA-dominated cluster
+(72% PA, low elevation), a large-basin cluster (median 2,567 km²) and a high-elevation/high-
+snow cluster (2,268 m, snow 44% of precipitation, melt 0.52) have any character. Cluster
+agreement with state (NMI 0.08) and with regime clusters built from signatures alone (NMI
+0.10) is low. The t-SNE shows why: the space is a **continuous manifold organized by a few
+gradients** — melt fraction (≈ elevation/snow) runs left→right, size runs top→bottom-right —
+not discrete regimes, so any partition cuts arbitrarily. PA is the only state that forms a
+distinct region; the 140 held-out basins land in plausible places (one HUC6 group of held-out
+CO basins sits together in the high-melt region).
+
+Neighborhoods carry modest regime structure beyond geography: 10-NN purity is ~2× chance for
+both state (0.48 vs 0.23) and regime cluster (0.48 vs 0.24); embedding neighbors are 25%
+closer in standardized-signature space than random pairs (2.41 vs 3.23) and still 21% closer
+when restricted to the same state (2.06 vs 2.62). Held-out basins' nearest training neighbors
+are less regime-consistent (2.77 vs 2.32 for training basins). Consistent with an
+identity-trained space: smooth regime gradients, weak local clustering, no regime "types".
+For comparison the production bank `FLEET_v8ctl_s42` (no log-σ channel, old sampler) has weaker
+local regime structure: 10-NN regime purity 0.41 (v10: 0.48), neighbor signature distance 2.71
+(v10: 2.41), within-state 2.21 (v10: 2.06) — the σ channel tightened regime neighborhoods.
