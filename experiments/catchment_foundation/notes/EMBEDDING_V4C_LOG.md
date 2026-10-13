@@ -535,3 +535,22 @@ reminder that in-sample probes reward whatever the training distribution over-re
 Closed from the review's list: nested-α probes, statics baselines, reconstruction assertions,
 milestone re-report, sampler fix with coverage test, log-σ ablation. Still open (need a
 decision): frozen held-out-basin split; forcing-conditioned teacher / image+statics student.
+
+## 12. Frozen held-out-basin split (2026-10-13)
+
+`experiments/catchment_foundation/splits/basin_split_v1.json` (committed, frozen; the builder
+`build_basin_split.py` refuses to overwrite it). 555 pre-2022 panel gauges grouped by **HUC6
+basin** (46 groups, nested upstream/downstream gauges stay together), groups assigned to 5
+folds within each state (largest group first to the lightest fold), so each fold holds out a
+share of every state — a within-region spatial holdout. Fold sizes 140/122/101/97/95 (fold 0
+is heaviest: it takes the largest basin of each state). Each site also carries its state for a
+whole-state holdout stress test (`--holdout-state`).
+
+Plumbing: `train_catchment_embeddings.py --split <json> --holdout-fold k` trains (and fits
+static normalization) on the training records only, embeds every record with the training-
+fitted statistics (FF loader `static_stats`, PR #919), and records the held-out sites and
+statistics in the bank; `embedding_probes.py` then reports the ridge fitted on training basins
+and scored on the held-out basins (nested penalty chosen on training basins) next to the same
+held-out statics baseline. Smoke-tested end to end. First real run: `FLEET_v10_f0_s42` —
+fleet recipe (linear head, batch 128, dim 256) + log-σ channel + fixed sampler, fold 0 held
+out (140 basins), results below when done.
