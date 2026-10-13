@@ -554,3 +554,25 @@ and scored on the held-out basins (nested penalty chosen on training basins) nex
 held-out statics baseline. Smoke-tested end to end. First real run: `FLEET_v10_f0_s42` —
 fleet recipe (linear head, batch 128, dim 256) + log-σ channel + fixed sampler, fold 0 held
 out (140 basins), results below when done.
+
+### 12a. First held-out-basin result (2026-10-13): fold 0, 140 basins, one seed
+
+`FLEET_v10_f0_s42` (fleet recipe: linear head, batch 128, dim 256, modality dropout; + log-σ
+channel, fixed sampler; trained on 415 basins), ridge fitted on training basins, scored on the
+140 held-out fold-0 basins, nested α; statics baseline fitted/scored the same way:
+
+| fold 0 held out                     | size  | flash | melt  | BFI   | cv    | diurnal | fdc   | high/low |
+|-------------------------------------|-------|-------|-------|-------|-------|---------|-------|----------|
+| embedding (gauged, unseen in training) | 0.436 | **0.249** | 0.427 | **0.355** | 0.128 | **0.180** | **0.360** | **0.620** |
+| physical statics baseline           | **0.735** | 0.157 | **0.693** | 0.150 | 0.088 | 0.065 | 0.139 | 0.201 |
+| in-sample CV over all 555 (reference) | 0.661 | 0.601 | 0.762 | 0.543 | 0.200 | 0.231 | — | — |
+
+Readings: (1) on unseen basins the embedding beats physical statics on every *dynamics*
+signature (flashiness, BFI, flow-duration slope, high/low ratio, diurnal) and loses on the two
+*climate-set* ones (size, melt fraction) that elevation/precipitation statics predict directly
+across states; (2) the drop from in-sample to held-out is large (melt 0.76 → 0.43, BFI 0.54 →
+0.36, flashiness 0.60 → 0.25) — much of the earlier in-sample signal was transductive, which
+is exactly why this split was needed; (3) single seed, one fold: the full protocol is 5 folds ×
+3 seeds (≈ 15 h sequential on the MacBook). Note the held-out embedding still uses the basin's
+own flow history ("gauged but unseen"); the ungauged (image + statics only) case is a separate,
+harder evaluation that the forecasting-teacher design would target.
