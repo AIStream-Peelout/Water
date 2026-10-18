@@ -601,3 +601,18 @@ identity-trained space: smooth regime gradients, weak local clustering, no regim
 For comparison the production bank `FLEET_v8ctl_s42` (no log-σ channel, old sampler) has weaker
 local regime structure: 10-NN regime purity 0.41 (v10: 0.48), neighbor signature distance 2.71
 (v10: 2.41), within-state 2.21 (v10: 2.06) — the σ channel tightened regime neighborhoods.
+
+### 13a. Interactive explorer rebuilt for panel banks (2026-10-18)
+
+`embedding_visualizer.py` now handles panel records (popup hydrograph = canonical 92-day hourly
+slices: seasons, flood, drought), colors by melt fraction / flashiness / BFI / size / state
+(from `*_signatures.csv` and the frozen split), outlines held-out basins, and shows the
+regional-context thumbnail. Page for the fold-0 bank:
+`pilot_data/embedding_dataset_hourly_pre2022/FLEET_v10_f0_s42/catchment_embeddings_v10_fold0.html`
+(38 MB, self-contained; open the file directly). Verified in-browser: render, dropdown, click
+popup (e.g. 01427510 Delaware River at Callicoon, PA, held out).
+
+Data note found via the popup: 3 of 1,106 regional views have an entirely-zero B02 band and 4
+have another band entirely zero (a per-band read that returned zeros instead of raising);
+otherwise bands are consistently ~93% valid. Negligible for training; re-extract those 7 views
+when the collector is next touched.
