@@ -393,7 +393,9 @@ class CatchmentVisualization(object):
                               args=[{"marker.color": [values.tolist()],
                                      "marker.colorscale": scale}])
                          for name, (values, scale) in colorings.items()],
-                direction="down", x=1.0, xanchor="right", y=1.12, yanchor="top")])
+                direction="down", x=0.0, xanchor="left", y=-0.07, yanchor="top",
+                pad=dict(t=6))],
+            margin=dict(b=110))
 
         output_path = os.path.join(self.output_dir, output_filename)
         html_string = fig.to_html(include_plotlyjs=True, config={
