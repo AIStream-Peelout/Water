@@ -34,6 +34,8 @@ SPINUP_HOURS = 720
 HORIZON_HOURS = 336
 TRAIN_END = "2022-01-01"
 TEST_START = "2023-01-01"
+# End of the trainer's own test loader under --lean-tuning: room for one 44-day window per basin.
+LEAN_TEST_END = "2023-03-01"
 
 
 def load_env(path: str) -> None:
@@ -125,7 +127,9 @@ def build_params(manifest_path: str, run_name: str, epochs: int, batch_size: int
                  swe_supervision_weight: float = 0.0,
                  decouple_snow_head: bool = False,
                  valid_basin_split: str = "train",
-                 trainer_test_basin_split: str = "train") -> Dict:
+                 trainer_test_basin_split: str = "train",
+                 loss: str = "mse", huber_beta: float = 1.0,
+                 trainer_test_end_date: Optional[str] = None) -> Dict:
     """
     Builds the FF config dict for the multi-basin run.
 
@@ -159,6 +163,17 @@ def build_params(manifest_path: str, run_name: str, epochs: int, batch_size: int
     :param use_asos_gate: Anchored mode: add the gated station-innovation term (rung 3),
         defaults to False.
     :type use_asos_gate: bool, optional
+    :param loss: Pointwise training and checkpoint-selection loss on standardized flow,
+        ``"mse"`` or ``"huber"`` (far less dominated by a few extreme windows), defaults to
+        ``"mse"``.
+    :type loss: str, optional
+    :param huber_beta: Smooth-L1 transition point when ``loss="huber"``, defaults to 1.0.
+    :type huber_beta: float, optional
+    :param trainer_test_end_date: Optional end date of the trainer's post-fit test loader. The
+        trainer scores that loader one window per forward pass, which costs the hybrid about a
+        second per window, and the experiment never uses the number; a short date range keeps it
+        to roughly one window per basin. Defaults to None (the full 2023+ range).
+    :type trainer_test_end_date: str, optional
     :return: The config dict.
     :rtype: Dict
     """
@@ -215,6 +230,11 @@ def build_params(manifest_path: str, run_name: str, epochs: int, batch_size: int
         "metrics": ["MSE"],
         "seed": seed,
     }
+    if trainer_test_end_date is not None:
+        params["dataset_params"]["test_end_date"] = trainer_test_end_date
+    if loss == "huber":
+        params["training_params"]["criterion"] = "SmoothL1Loss"
+        params["training_params"]["criterion_params"] = {"beta": huber_beta}
     parameter_head_params = {}
     if parameter_logit_limit is not None:
         parameter_head_params["logit_limit"] = parameter_logit_limit
@@ -294,6 +314,9 @@ def main() -> None:
                         help="Use basin_valid split labels already present in the manifest "
                              "(e.g. carried over by build_manifest --carry-splits) instead of "
                              "sampling a fresh development holdout")
+    parser.add_argument("--loss", choices=("mse", "huber"), default="mse",
+                        help="Training and checkpoint-selection loss on standardized flow")
+    parser.add_argument("--huber-beta", type=float, default=1.0)
     parser.add_argument("--init-from", default=None,
                         help="Optional model state_dict used to warm-start this run")
     parser.add_argument("--freeze-parameter-head", action="store_true",
@@ -319,8 +342,9 @@ def main() -> None:
     parser.add_argument(
         "--lean-tuning", action="store_true",
         help="Build the trainer's unused post-fit test-loss loader from the validation basins "
-             "instead of duplicating the full training fleet in memory. Training, early "
-             "stopping, and forecast_report evaluation are unchanged.",
+             "and from the first weeks of 2023 only (about one window per basin) instead of "
+             "the full training fleet. Training, early stopping, and forecast_report "
+             "evaluation are unchanged.",
     )
     args = parser.parse_args()
     if args.eval_gauged_only and args.eval_basin_validation_only:
@@ -366,7 +390,9 @@ def main() -> None:
                           decouple_snow_head=args.decouple_snow_head,
                           valid_basin_split=valid_basin_split,
                           trainer_test_basin_split=(valid_basin_split if args.lean_tuning
-                                                    else "train"))
+                                                    else "train"),
+                          loss=args.loss, huber_beta=args.huber_beta,
+                          trainer_test_end_date=LEAN_TEST_END if args.lean_tuning else None)
     params["training_params"]["freeze_parameter_head"] = args.freeze_parameter_head
     params["training_params"]["init_from"] = args.init_from
     with open(os.path.join(run_dir, "config.json"), "w") as f:
