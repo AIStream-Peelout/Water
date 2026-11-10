@@ -53,7 +53,7 @@ def build_crossformer_params(
         input_clip: Optional[float] = 20.0, loss: str = "mse",
         huber_beta: float = 1.0, residual_smoothing_hours: int = 1,
         nonnegative: bool = False, event_sample_power: float = 0.0,
-        require_pretrained_embedding: bool = True) -> Dict:
+        require_pretrained_embedding: bool = True, context_mode: str = "channels") -> Dict:
     """
     Builds an FF-native config for the direct multi-basin Crossformer.
 
@@ -107,6 +107,10 @@ def build_crossformer_params(
     :param require_pretrained_embedding: Whether to exclude basins without a pretrained catchment
         embedding, defaults to True so fixed contrastive vectors are not mixed with learned IDs.
     :type require_pretrained_embedding: bool, optional
+    :param context_mode: ``"channels"`` appends the projected context as constant input series;
+        ``"tokens"`` passes it as the Crossformer's static covariates (added to every token),
+        defaults to ``"channels"``.
+    :type context_mode: str, optional
     :return: Resolved Flow Forecast configuration.
     :rtype: Dict
     """
@@ -183,6 +187,9 @@ def build_crossformer_params(
     }
     if loss == "huber":
         params["training_params"]["criterion_params"] = {"beta": huber_beta}
+    if context_mode != "channels":
+        # Written only when it differs, so configs stay loadable by older Flow Forecast checkouts.
+        params["model_params"]["context_mode"] = context_mode
     if params["wandb"]:
         params["wandb"]["tags"].extend([
             loss,
@@ -216,6 +223,9 @@ def main() -> None:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--context-channels", type=int, default=8,
                         help="Projected catchment-embedding channels; 0 disables context")
+    parser.add_argument("--context-mode", choices=("channels", "tokens"), default="channels",
+                        help="How the context reaches the model: constant input series, or "
+                             "static covariates added to every token")
     parser.add_argument("--history-only", action="store_true",
                         help="Do not expose realized horizon meteorology to the model")
     parser.add_argument("--input-clip", type=float, default=20.0,
@@ -267,7 +277,8 @@ def main() -> None:
         residual_smoothing_hours=args.residual_smoothing_hours,
         nonnegative=args.nonnegative,
         event_sample_power=args.event_sample_power,
-        require_pretrained_embedding=not args.allow_missing_embeddings)
+        require_pretrained_embedding=not args.allow_missing_embeddings,
+        context_mode=args.context_mode)
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(params, f, indent=1)
 
