@@ -15,6 +15,11 @@ Nothing here trains a model. Three questions, one subcommand each:
     physics. The gap between "calibrated" and "shared" bounds what any static context can add
     through the parameter head.
 
+``compare``
+    How do several finished runs rank on the same evaluation windows? Reads the unrounded
+    per-basin errors each run's evaluation saved and pairs every run with a reference run basin
+    by basin (for example every context arm against the no-context arm).
+
 ``audit``
     Is a finished run's headline number trustworthy? Puts the validation number that drove early
     stopping next to what persistence scores on the same windows, reports how much of the pooled
@@ -520,6 +525,65 @@ def _case_errors(cases_path: str) -> Tuple[List[str], np.ndarray, np.ndarray, np
             np.bincount(basin, weights=persistence, minlength=len(sites)), persistence)
 
 
+def compare_runs(runs: Dict[str, str], reference: str, split: str) -> Dict:
+    """
+    Ranks finished runs on one evaluation split and pairs each with a reference run.
+
+    :param runs: Run directories by label; all must have scored the same windows.
+    :type runs: Dict[str, str]
+    :param reference: Label of the run every other run is paired against.
+    :type reference: str
+    :param split: Evaluation split name, e.g. ``ungauged_2023``.
+    :type split: str
+    :return: Per-band skill summaries; non-reference runs carry ``versus_reference`` (share of
+        basins where the run beats the reference, median error reduction, pooled difference).
+    :rtype: Dict
+    """
+    loaded = {}
+    for label, run_dir in runs.items():
+        with open(os.path.join(run_dir, "eval_" + split, "basin_band_errors.json")) as file:
+            loaded[label] = json.load(file)
+    sites = sorted(set.intersection(*[set(errors) for errors in loaded.values()]))
+    if not sites:
+        raise SystemExit("the runs share no evaluated basin in %s" % split)
+    windows = np.array([loaded[reference][site]["n_windows"] for site in sites], dtype=float)
+    report = {"split": split, "reference": reference, "basins": len(sites),
+              "windows": int(windows.sum()), "bands": {}}
+    for band in BANDS:
+        def sums(label: str, key: str) -> np.ndarray:
+            return np.array([loaded[label][site][band][key] for site in sites]) * windows
+        persistence_error = sums(reference, "persistence_mse")
+        report["bands"][band] = {}
+        for label in runs:
+            if not np.allclose(sums(label, "persistence_mse"), persistence_error, rtol=1e-5):
+                raise SystemExit("%s and %s did not score the same windows" % (label, reference))
+            entry = skill_summary(sums(label, "model_mse"), persistence_error)
+            if label != reference:
+                entry["versus_reference"] = paired_summary(
+                    sums(label, "model_mse"), sums(reference, "model_mse"), persistence_error)
+            report["bands"][band][label] = entry
+    return report
+
+
+def _print_comparison(report: Dict) -> None:
+    """Prints one row per run and band, paired against the reference run."""
+    print("%s: %d basins, %d windows; paired against '%s'"
+          % (report["split"], report["basins"], report["windows"], report["reference"]))
+    for band, runs in report["bands"].items():
+        print("\n%s" % band)
+        print("  %-24s %8s %8s %10s   %-18s %s"
+              % ("run", "pooled", "median", "beat pers", "beats reference on",
+                 "median error cut (95% interval)"))
+        for label, entry in runs.items():
+            versus = entry.get("versus_reference")
+            paired = "" if versus is None else "%3.0f%% of basins      %+5.1f%% (%+.1f to %+.1f)" % (
+                versus["a_better_basins_pct"], versus["median_mse_reduction_pct"],
+                *versus["median_mse_reduction_ci95"])
+            print("  %-24s %8.1f %8.1f %9.0f%%   %s" % (
+                label, entry["pooled_skill_pct"], entry["median_basin_skill_pct"],
+                entry["basins_beating_persistence_pct"], paired))
+
+
 def _parse_labelled_path(specification: str) -> Tuple[str, str]:
     """Parses ``label=/path`` CLI values."""
     label, separator, path = specification.partition("=")
@@ -558,7 +622,13 @@ def main() -> None:
     audit.add_argument("--run-dir", required=True)
     audit.add_argument("--versus", default=None)
 
-    for sub in (context, headroom, audit):
+    compare = commands.add_parser("compare", help="rank finished runs against a reference run")
+    compare.add_argument("--run", action="append", type=_parse_labelled_path, required=True,
+                         help="label=run_dir; repeat for every run")
+    compare.add_argument("--reference", required=True, help="Label of the reference run")
+    compare.add_argument("--split", default="ungauged_2023")
+
+    for sub in (context, headroom, audit, compare):
         sub.add_argument("--output", default=None, help="Optional JSON report path")
     args = parser.parse_args()
 
@@ -578,6 +648,12 @@ def main() -> None:
         print("production-store init fraction %.2f: %d basins, %d windows"
               % (report["production_init_fraction"], report["basins"], report["windows"]))
         _print_table(report["bands"], "calibrated")
+    elif args.command == "compare":
+        runs = dict(args.run)
+        if args.reference not in runs:
+            parser.error("--reference must name one of the --run labels")
+        report = compare_runs(runs, args.reference, args.split)
+        _print_comparison(report)
     else:
         report = run_audit(args.run_dir, args.versus)
         validation = report["validation"]
