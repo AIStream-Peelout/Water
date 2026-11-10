@@ -185,7 +185,7 @@ def save_forecast_gallery(split_outputs: Dict[str, Dict], loader, areas: Dict[st
     return gallery_path
 
 
-def collect_split_outputs(model, loader) -> Dict[str, Dict]:
+def collect_split_outputs(model, loader, batch_size: int = 128) -> Dict[str, Dict]:
     """
     Runs the model over every window of a split loader and groups physical-unit outputs by basin.
 
@@ -193,6 +193,9 @@ def collect_split_outputs(model, loader) -> Dict[str, Dict]:
     :type model: torch.nn.Module
     :param loader: A MultiBasinWindowLoader for the split.
     :type loader: MultiBasinWindowLoader
+    :param batch_size: Windows per forward pass, defaults to 128 (per-step overhead dominates the
+        hybrid's ODE solve, so small batches are several times slower for the same result).
+    :type batch_size: int, optional
     :return: site_id -> {"sim", "obs", "persist" (n_windows, horizon) mm/hr tensors, "t0s"}.
     :rtype: Dict[str, Dict]
     """
@@ -203,7 +206,7 @@ def collect_split_outputs(model, loader) -> Dict[str, Dict]:
     outputs = {site: {"sim": [], "obs": [], "persist": [], "t0s": []}
                for site in loader.basin_site_ids}
     position_to_local = {pos: i for i, pos in enumerate(loader.basin_positions)}
-    batch_iter = DataLoader(loader, batch_size=16, shuffle=False)
+    batch_iter = DataLoader(loader, batch_size=batch_size, shuffle=False)
     window = 0
     with torch.no_grad():
         for src, trg in batch_iter:
@@ -226,6 +229,31 @@ def collect_split_outputs(model, loader) -> Dict[str, Dict]:
     return {site: {key: (torch.stack(value) if key != "t0s" else torch.tensor(value))
                    for key, value in data.items()}
             for site, data in outputs.items() if data["sim"]}
+
+
+def basin_band_errors(split_outputs: Dict[str, Dict]) -> Dict:
+    """
+    Computes unrounded per-basin mean squared errors for every lead band.
+
+    The rounded values in ``per_basin_metrics.json`` lose all precision on large rivers, whose
+    flows in mm/hr are tiny; paired run-to-run comparisons need these instead.
+
+    :param split_outputs: The per-basin outputs from :func:`collect_split_outputs`.
+    :type split_outputs: Dict[str, Dict]
+    :return: site_id -> {"n_windows", band -> {"model_mse", "persistence_mse"}} in (mm/hr)^2.
+    :rtype: Dict
+    """
+    errors = {}
+    for site, data in split_outputs.items():
+        sim, obs, persist = (data[key].double().numpy() for key in ("sim", "obs", "persist"))
+        entry = {"n_windows": int(sim.shape[0])}
+        for name, (a, b) in BANDS.items():
+            entry[name] = {
+                "model_mse": float(((sim[:, a:b] - obs[:, a:b]) ** 2).mean()),
+                "persistence_mse": float(((persist[:, a:b] - obs[:, a:b]) ** 2).mean()),
+            }
+        errors[site] = entry
+    return errors
 
 
 def pooled_metrics(split_outputs: Dict[str, Dict]) -> Dict:
@@ -311,6 +339,8 @@ def evaluate_splits(ff_model, manifest_path: str, run_dir: str, eval_stride: int
         all_metrics[split_name] = pooled
         out_dir = os.path.join(run_dir, "eval_" + split_name)
         os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "basin_band_errors.json"), "w") as f:
+            json.dump(basin_band_errors(outputs), f)
 
         per_basin = {}
         site_to_local = {site: i for i, site in enumerate(loader.basin_site_ids)}
