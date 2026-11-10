@@ -13,12 +13,102 @@ import json
 import os
 import sys
 import time
-from typing import List
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 import torch
 
 sys.path.insert(0, os.environ.get("FF_REPO", "/Users/isaac/Documents/GitHub/flow-forecast"))
+
+
+def select_holdout_sites(split_sites: Dict[str, Dict], folds: Optional[Sequence[int]],
+                         state: Optional[str]) -> List[str]:
+    """
+    Lists the sites a frozen split holds out of training.
+
+    :param split_sites: The split's per-site entries (site id -> {"fold", "state", ...}).
+    :type split_sites: Dict[str, Dict]
+    :param folds: Folds to hold out, or None for no fold holdout.
+    :type folds: Sequence[int], optional
+    :param state: A whole state to hold out as well, or None.
+    :type state: str, optional
+    :return: Sorted ids of every site in one of the folds or in the state.
+    :rtype: List[str]
+    :raises ValueError: If a requested fold does not occur in the split.
+    """
+    fold_set = set(folds or [])
+    unknown = fold_set - {info["fold"] for info in split_sites.values()}
+    if unknown:
+        raise ValueError("folds not in the split: %s" % sorted(unknown))
+    return sorted(site for site, info in split_sites.items()
+                  if info["fold"] in fold_set or (state is not None and info["state"] == state))
+
+
+def describe_holdout(folds: Optional[Sequence[int]], state: Optional[str]) -> str:
+    """
+    Words the holdout for the log line, e.g. "fold 0", "folds 0, 1" or "state CO".
+
+    :param folds: Held-out folds, or None.
+    :type folds: Sequence[int], optional
+    :param state: Held-out state, or None.
+    :type state: str, optional
+    :return: A short description.
+    :rtype: str
+    """
+    parts = []
+    if folds:
+        parts.append("fold%s %s" % ("s" if len(folds) > 1 else "",
+                                    ", ".join(str(fold) for fold in folds)))
+    if state is not None:
+        parts.append("state %s" % state)
+    return " and ".join(parts)
+
+
+def summary_holdout_fold(folds: Optional[Sequence[int]]):
+    """
+    Returns the ``holdout_fold`` value written to the training summary.
+
+    One held-out fold stays a bare number, as in summaries written before several folds could
+    be held out; several folds are written as a list.
+
+    :param folds: Held-out folds, or None.
+    :type folds: Sequence[int], optional
+    :return: None, the single fold, or the list of folds.
+    """
+    if not folds:
+        return None
+    return folds[0] if len(folds) == 1 else list(folds)
+
+
+def link_training_records(combined_dir: str, train_dir: str, held: set) -> int:
+    """
+    Symlinks every record that is not held out into the training directory.
+
+    A training directory left by an earlier run with a different holdout loses the links of
+    basins that are now held out, so they cannot stay in training.
+
+    :param combined_dir: Directory with every site's record (``<site>.npz``).
+    :type combined_dir: str
+    :param train_dir: Directory to hold links to the training records only.
+    :type train_dir: str
+    :param held: Site ids held out of training.
+    :type held: set
+    :return: The number of training records.
+    :rtype: int
+    """
+    os.makedirs(train_dir, exist_ok=True)
+    for name in sorted(os.listdir(combined_dir)):
+        if name.endswith(".npz") and name[:-4] not in held:
+            target = os.path.join(train_dir, name)
+            if not os.path.exists(target):
+                os.symlink(os.path.realpath(os.path.join(combined_dir, name)), target)
+    for name in sorted(os.listdir(train_dir)):
+        if name.endswith(".npz") and name[:-4] in held:
+            stale = os.path.join(train_dir, name)
+            if not os.path.islink(stale):
+                raise SystemExit("%s is held out but is a regular file in %s" % (name, train_dir))
+            os.unlink(stale)
+    return len([name for name in os.listdir(train_dir) if name.endswith(".npz")])
 
 
 def build_combined_dir(state_dirs: List[str], combined_dir: str) -> int:
@@ -124,7 +214,9 @@ def main() -> None:
                              "basin_split_v1.json); with --holdout-fold or --holdout-state the "
                              "held-out basins are excluded from training and from the static "
                              "normalization fit, but still embedded (training-fitted stats)")
-    parser.add_argument("--holdout-fold", type=int, default=None)
+    parser.add_argument("--holdout-fold", type=int, nargs="+", default=None,
+                        help="Fold(s) of --split to hold out; give several (e.g. 0 1) when both "
+                             "a development and a test fold must stay unseen by the encoder")
     parser.add_argument("--holdout-state", default=None)
     parser.add_argument("--history-log-std", action="store_true",
                         help="Append the site's log-flow standard deviation as a 7th history "
@@ -150,24 +242,17 @@ def main() -> None:
             raise SystemExit("--holdout-fold/--holdout-state need --split")
         with open(args.split) as handle:
             split = json.load(handle)["sites"]
-        holdout_sites = sorted(
-            site for site, info in split.items()
-            if ((args.holdout_fold is not None and info["fold"] == args.holdout_fold)
-                or (args.holdout_state is not None and info["state"] == args.holdout_state))
-            and os.path.exists(os.path.join(combined_dir, site + ".npz")))
+        try:
+            selected = select_holdout_sites(split, args.holdout_fold, args.holdout_state)
+        except ValueError as error:
+            raise SystemExit("--holdout-fold: %s" % error)
+        holdout_sites = [site for site in selected
+                         if os.path.exists(os.path.join(combined_dir, site + ".npz"))]
         train_dir = os.path.join(args.output_dir, "training_records")
-        os.makedirs(train_dir, exist_ok=True)
-        held = set(holdout_sites)
-        for name in sorted(os.listdir(combined_dir)):
-            if name.endswith(".npz") and name[:-4] not in held:
-                target = os.path.join(train_dir, name)
-                if not os.path.exists(target):
-                    os.symlink(os.path.realpath(os.path.join(combined_dir, name)), target)
-        n_train = len([n for n in os.listdir(train_dir) if n.endswith(".npz")])
-        print("holding out %d basins (%s); training on %d" % (
-            len([s for s in holdout_sites if os.path.exists(os.path.join(combined_dir, s + ".npz"))]),
-            "fold %d" % args.holdout_fold if args.holdout_fold is not None
-            else "state %s" % args.holdout_state, n_train))
+        n_train = link_training_records(combined_dir, train_dir, set(holdout_sites))
+        print("holding out %d basins (%s); training on %d"
+              % (len(holdout_sites), describe_holdout(args.holdout_fold, args.holdout_state),
+                 n_train))
     else:
         train_dir = combined_dir
     combine_gauges_csv([os.path.join(args.scrape_root, state) for state in args.states],
@@ -195,7 +280,9 @@ def main() -> None:
                           "vision_source": args.vision_source,
                           "vision_patch_size": args.vision_patch_size,
                           "history_log_std": args.history_log_std,
-                          "split": args.split, "holdout_fold": args.holdout_fold,
+                          "split": args.split,
+                          "holdout_fold": summary_holdout_fold(args.holdout_fold),
+                          "holdout_folds": list(args.holdout_fold or []),
                           "holdout_state": args.holdout_state,
                           "n_holdout_sites": len(holdout_sites),
                           "seed": args.seed, "data_root": args.data_root}}
@@ -260,9 +347,12 @@ def main() -> None:
                                                   num_workers=args.num_workers)
         torch.save(encoder.state_dict(),
                    os.path.join(args.output_dir, "encoder_%s.pt" % fusion))
+        # The static statistics go in as tensors: forecast models and manifest tools load banks
+        # with weights_only=True, which refuses NumPy arrays.
         torch.save({"site_ids": site_ids, "embeddings": embeddings,
                     "holdout_sites": holdout_sites, "split": args.split,
-                    "static_mean": dataset.static_mean, "static_std": dataset.static_std},
+                    "static_mean": torch.as_tensor(dataset.static_mean),
+                    "static_std": torch.as_tensor(dataset.static_std)},
                    os.path.join(args.output_dir, "embeddings_%s.pt" % fusion))
         summary[fusion] = {"first_loss": losses[0], "final_loss": losses[-1],
                            "minutes": round((time.time() - start) / 60.0, 2),
