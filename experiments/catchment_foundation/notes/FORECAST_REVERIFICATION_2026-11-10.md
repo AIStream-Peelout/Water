@@ -220,3 +220,57 @@ values up to 307 mm), and an all-missing hour is written as 0. The hybrid's stat
 add a share of that excess as rain and is a function of the context, so the hybrid arms run
 without it. `p01m` remains one of the Crossformer's nine inputs (standardized per basin) in every
 arm. Fixing the scraper and regenerating the column is a separate task.
+
+## 9. Context ablation, hybrid arms (2026-11-11, one seed)
+
+Eight runs of queue `ctxf0`, 8–15 min each on CPU. Reports:
+`calibration/context_ablation_cout_f0/reports/hybrid_*.json` (`forecast_diagnostics.py compare`).
+"Error cut" is the median per-basin reduction of MSE relative to the reference arm, with a
+basin-bootstrap 95% interval; lead bands are day 1–3 / 4–7 / 8–14.
+
+**The forecaster first.** With no context the head learns one parameter set for every basin:
+X1 = 1,743 mm (bound 2,000), X4 = 105 h (bound 120), X2 = +4.4. A soil store that large at a
+0.1 start passes about 1% of rain on as runoff, so the model has switched runoff generation
+off; its forecasts have a median amplitude of 0.10 of the observed and a median correlation of
+0.05 with it. The "persistence parity" it scores (held-out median skill +0.2 / +0.1 / +0.5%,
+55% of basins beating persistence) is an imitation of persistence, not a forecast. Context arms
+stay close to it (median X1 1,160–1,650 mm, amplitude 0.22–0.28, correlation 0.08–0.15). All
+comparisons below are therefore small modulations around persistence.
+
+**Seed noise** (no-context arm, seed 43 against 42): error cut +0.0 / +0.1 / +0.1% with intervals
+inside ±0.8%; the win rate still moves to 53–58%, so win rates within about ten points of 50%
+mean nothing at 53 basins. A one-parameter-set arm is unusually stable, so this understates the
+seed noise of the context arms.
+
+**Held-out basins (53), each arm against no context:**
+
+| arm | error cut day 1–3 | day 4–7 | day 8–14 | better than none on (all leads) |
+|---|---|---|---|---|
+| statics | +0.2% (−2.0 to +3.4) | +5.0% (−2.4 to +9.7) | +1.3% (−3.6 to +7.0) | 57% of basins |
+| statics + signatures | +2.9% (−0.8 to +5.8) | +3.4% (+0.2 to +10.1) | −0.3% (−3.0 to +7.8) | 53% |
+| v10 embedding | +0.0% (−5.1 to +2.0) | −1.8% (−11.1 to +4.0) | −2.7% (−26.8 to +4.2) | 45% |
+| v10 shuffled | +0.6% (−0.6 to +1.3) | −0.2% (−4.4 to +1.2) | +0.1% (−7.3 to +3.3) | 53% |
+| v8ctl embedding (encoder saw these basins) | −0.1% (−2.9 to +3.4) | −0.2% (−4.2 to +1.4) | +0.2% (−1.4 to +3.9) | 49% |
+
+By the rule of §8 no arm is distinguishable from no context on held-out basins.
+
+**Embedding against the other arms, held-out basins:**
+- v10 against v10 shuffled: +0.5% (−0.2 to +6.9) / −0.1% / −1.0%; better on 60 / 47 / 43% of
+  basins. The embedding's content is not distinguishable from a permutation of it.
+- v10 against statics + signatures: −1.9% (−4.9 to +0.7) / −4.7% (−16.3 to −1.3) / −4.6% (−15.4
+  to −0.5); better on 40 / 30 / 34% of basins and on 23% for all leads (−6.3%, −19.8 to −2.2).
+  v8ctl against statics + signatures: −2.6% / −10.7% (−29.2 to −1.5) / −3.0% (−8.8 to −0.6).
+  This passes the rule of §8: as hybrid context on unseen basins the hand-built vector is better
+  than either embedding. Statics alone and statics + signatures are indistinguishable.
+
+**Trained-on basins (83):** nothing at day 1–7. At day 8–14 every per-basin context beats no
+context: statics +6.3% (+1.5 to +13.0), statics + signatures +12.1% (+5.3 to +15.6), v8ctl +7.1%
+(+1.4 to +14.6), learned rows +4.9% (+0.3 to +9.2), v10 +3.4% (−0.8 to +9.7) — and v10 shuffled
++10.0% (+6.1 to +13.3). A permuted embedding helping as much as anything is the identifier
+effect: on basins it trained on, the head can attach parameters to any fixed distinct vector.
+
+**Caveats.** One seed. Checkpoint selection differed between arms: the v10 run's validation was
+best after its first epoch (161.1, then 169.7, 218.7, 162.4, stopped), while v10 shuffled ran
+ten epochs and peaked at the eighth; validation of every context arm spikes (212–248 against a
+best of 157–166), which says a learning rate of 1e-3 is too high for the head on standardized
+contexts. The held-out fold is CO-heavy (38 CO, 17 UT) while training is UT-heavy (21 CO, 64 UT).
