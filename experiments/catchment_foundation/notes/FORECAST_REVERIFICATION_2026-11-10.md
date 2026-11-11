@@ -311,3 +311,77 @@ skill −111%; v10 shuffled −62%; v8ctl −40%), while statics do not (−5.9%
 to +7.7). Below 40% snow every arm sits within noise of no context. A 256-wide embedding fitted
 on 85 basins gives the parameter head room to memorize, and what it emits for unseen snow basins
 is harmful; one seed, and the v10 checkpoint is from its first epoch.
+
+## 10. Context ablation, Crossformer arms (2026-11-11, one seed)
+
+Nine runs of queue `ctxf0`, about 34 min each on CPU; the whole queue (17 runs) took 2 h 27 min
+at three at a time with a peak of 8.7 GB. Reports:
+`calibration/context_ablation_cout_f0/reports/crossformer_*.json`.
+
+**The forecaster.** Without context the Crossformer has small real skill at long lead on basins
+it never trained on: held-out median skill +0.1 / +0.1 / +7.0% at day 1–3 / 4–7 / 8–14 with
+53 / 53 / 70% of basins beating persistence (second seed: +0.2 / +1.4 / +5.1%; 53 / 58 / 62%).
+Trained-on basins: −0.5 / +2.0 / +5.7%, 45 / 57 / 75%. Every run was still improving at its
+seventh or eighth (last) epoch, so these are undertrained models.
+
+**Seed noise is large here.** The second no-context seed against the first: held-out error cut
+−1.4% (−4.2 to +0.1) / +0.1% / −0.1%; trained-on −2.8% (−5.3 to −0.9) / −3.0% (−4.2 to −1.4) /
+−0.2%, winning on only 30–34% of basins at day 1–7. Two runs of the same arm differ by about 3%
+with a basin-bootstrap interval that excludes zero, so intervals over basins do not cover seed
+variance and nothing below roughly 5% can be read at one seed.
+
+**Each arm against no context (seed 42), error cut at day 1–3 / 4–7 / 8–14:**
+
+| arm | held-out basins (53) | trained-on basins (83) |
+|---|---|---|
+| statics | +1.8 / +1.2 / +1.0% | −3.0 / −3.1 / +0.9% |
+| statics + signatures | −3.6 / +0.1 / +0.2% | −3.2 / −8.4 / −3.6% |
+| v10 embedding | −0.3 / +0.2 / +0.1% | −0.5 / −5.2 / −3.5% |
+| v10 shuffled | −1.1 / −1.5 / +0.5% | −2.7 / −4.1 / −2.5% |
+| v8ctl embedding | −0.5 / −0.8 / −0.9% | −2.6 / −4.6 / −0.8% |
+| learned rows | (no context on unseen basins) | −2.5 / −6.4 / −3.0% |
+| v10 through the old constant-series path | −0.6 / −0.3 / −2.6% | −0.3 / −1.1 / −2.1% |
+
+No arm is distinguishable from no context on held-out basins. On trained-on basins every
+context arm is a few percent *worse* than the first no-context seed, by about as much as the
+second no-context seed is; by the rule of §8 none of these counts. The arm that matters most is
+the learned rows: a private vector per training basin is the most a static context can offer
+on those basins, and it does not help (−5.7% over all leads). On the 2022 selection windows the
+context arms did look better (best validation 155–158 against 159.3 and 163.2 for the two
+no-context seeds); that advantage does not carry to 2023 onward.
+
+Embedding against the other arms, held-out basins: v10 against v10 shuffled +0.0 / +0.1 / +3.4%
+(+0.0 to +9.3), better on 53 / 53 / 64% of basins; v10 against statics + signatures +1.0 / +0.3 /
+−0.4%. Within seed noise.
+
+**The model does use its context through the new path** (`forecast_diagnostics.py context`,
+all leads):
+
+| checkpoint | forecast change when the context is permuted | correct context beats a permuted one on |
+|---|---|---|
+| v10, static conditioning, trained-on / held-out | 51% / 29% | 63% / 62% of basins |
+| statics + signatures, trained-on / held-out | 56% / 71% | 58% / 62% |
+| v8ctl, held-out | 47% | 55% |
+| learned rows, trained-on | 60% | 65% |
+| v10, old constant-series path, trained-on / held-out | 0.0% / 0.0% | 45% / 49% |
+
+So the conditioning fix works mechanically, and inside a conditioned model the right context is
+better than a wrong one on about 60% of held-out basins. But a model trained with any context
+is no better than one trained with none: what it learns to take from the context, the
+no-context model takes from the 30 days of observed flow and meteorology it is given anyway.
+
+## 11. Where this leaves the representation question
+
+On this cohort and task (14-day hindcast, 30 days of observed flow at issue time, CO/UT, one
+seed), neither forecaster rewards a per-basin static context, whatever its source:
+- Crossformer: learned rows, statics, signatures and both embeddings are all within seed noise
+  of no context, on trained-on and on unseen basins.
+- Hybrid: it imitates persistence; statics-based contexts are harmless to slightly positive,
+  and the embeddings are worse than statics + signatures on unseen basins.
+
+The embedding has not been shown to carry anything a forecaster can use beyond what the
+physical statics and its own recent flow provide. Before more work on the embedding, the cases
+to test are the ones where a static context has room: more training and a second look at the
+learned-rows control (if a private vector per basin cannot help a trained model, nothing static
+can), the five-state cohort where regimes differ far more than within CO/UT, and operation
+without the observed-flow history.
