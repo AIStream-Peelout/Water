@@ -274,3 +274,40 @@ best after its first epoch (161.1, then 169.7, 218.7, 162.4, stopped), while v10
 ten epochs and peaked at the eighth; validation of every context arm spikes (212–248 against a
 best of 157–166), which says a learning rate of 1e-3 is too high for the head on standardized
 contexts. The held-out fold is CO-heavy (38 CO, 17 UT) while training is UT-heavy (21 CO, 64 UT).
+
+### 9a. Why the hybrid switches runoff off: not the percolation constant
+
+Suspicion raised earlier in the day: `GR4Dynamics` applies the daily GR4 percolation constant
+(4/9) in an hourly integration, where the hourly variant GR4H uses 4/21, about 30 times slower.
+Checked with a process-local patch that multiplies the percolation term by (2.25/5.25)^4 = 0.0337
+(scratch runs `scratch_perc_hourly_init{01,03,05}`, no-context arm, otherwise the queue's hybrid
+settings; nothing in flow-forecast was changed):
+
+| percolation, soil-store start | best validation | shared X1 / X4 / melt factor | held-out median skill day 1–3 / 4–7 / 8–14 | forecast amplitude, correlation |
+|---|---|---|---|---|
+| daily constant, 0.1 (queue arm) | 172.3 | 1,743 mm / 105 h / 0.077 | +0.2 / +0.1 / +0.5% | 0.10, 0.05 |
+| hourly constant, 0.1 | 173.0 | 1,540 mm / 94 h / 0.112 | +0.3 / −1.4 / +0.3% | 0.10, 0.07 |
+| hourly constant, 0.3 | 183.0 | 1,920 mm / 115 h / 0.008 | −0.1 / −1.3 / +0.2% | 0.23, 0.08 |
+| hourly constant, 0.5 | 248.1 | 1,904 mm / 114 h / 0.009 | −10.5 / −28.5 / −19.8% | 0.54, 0.05 |
+
+The suspicion is withdrawn. With the slower percolation the head still drives the soil store and
+the routing time to their upper bounds, and at wetter starts it also drives the melt factor to
+zero. Whenever the model is made to respond more, validation and skill get worse while the
+correlation with observations stays at 0.05–0.08: across this cohort the simulated variability
+is unrelated to the observed changes, so the best shared parameter set is the one that does
+nothing.
+
+Where the physics does track: per-basin median window correlation (start 0.3 run, 125 basins)
+has quartiles −0.02 / 0.10 / 0.25, with 22 basins above 0.3 and 9 above 0.5; it rises with snow
+share of precipitation (Spearman 0.40), mean precipitation (0.37) and mean elevation (0.30) and
+falls with drainage area (−0.24). The ten best are snowmelt headwaters at 2,500–3,650 m with
+40–66% snow, and most of them still have negative skill (right shape, wrong magnitude under one
+shared parameter set). That is where per-basin parameters ought to matter.
+
+Exploratory split of §9 by snow share (not in the reading rules; 20 held-out basins at 40% or
+more, 33 below): on the snow-dominated held-out basins the no-context arm scores −19.8% median
+skill and the embeddings make it much worse (v10: worse than no context on 80% of basins, median
+skill −111%; v10 shuffled −62%; v8ctl −40%), while statics do not (−5.9%, +1.9% error cut, −2.2
+to +7.7). Below 40% snow every arm sits within noise of no context. A 256-wide embedding fitted
+on 85 basins gives the parameter head room to memorize, and what it emits for unseen snow basins
+is harmful; one seed, and the v10 checkpoint is from its first epoch.
