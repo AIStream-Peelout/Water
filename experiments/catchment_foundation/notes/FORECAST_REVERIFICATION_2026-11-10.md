@@ -131,3 +131,35 @@ Readings:
 - The forecast evaluation basins and the embedding split are still not aligned (14 of the 27
   forecast `holdout` basins were trained on by `FLEET_v10_f0_s42`). The fix is to derive forecast
   dev/test basins from `basin_split_v1` folds and hold both folds out of embedding training.
+
+## 7. Follow-up the same day: a context path the Crossformer cannot ignore
+
+Why §4's Crossformer ignored its context: the eight projected context channels were not too
+small to see (between-basin spread 0.3–1.0, the scale of the standardized meteorology), but the
+flow series could only read them through cross-dimension attention and never learned to.
+flow-forecast branch `crossformer-static-conditioning` (one commit on top of PR #919) adds
+`Crossformer(static_dim=...)`: the projected context is added to every encoder token and decoder
+query. Water: `run_crossformer.py --context-mode tokens`.
+
+Same 12 training basins, 16,384 samples, seed and loss (Huber); only the context path differs
+(`FLEET_v10_f0_s42` contexts, standardized on training basins; `forecast_diagnostics.py context`):
+
+| context path | basins | forecast change when the context is permuted | correct beats permuted on |
+|---|---|---|---|
+| constant input series (old) | 12 trained on | 0.4% | 50% of basins (day 1–3) |
+| | 11 held out (fold 0) | 1.0% | 55% |
+| static conditioning (new) | 12 trained on | 46.6% | 92% (day 1–3), 75% (all leads) |
+| | 11 held out (fold 0) | 37.0% | 45% |
+
+The new path makes the model use its context. With only 12 training basins it uses it as an
+identifier: nothing transfers to held-out basins, where the context-using model is also worse
+(all-lead median −22% against −9% for the model that ignores context). Whether content transfers
+with the full cohort, and against statics, shuffled and no-context arms, is what the queued
+ablation tests (`prepare_context_ablation.py`, `run_context_ablation.py`; arms in
+`calibration/context_ablation_cout_f0/`, 85 training and 55 held-out CO/UT basins).
+
+Also found while timing runs: after training, the Flow Forecast trainer scores its own test
+loader one window per forward pass. For the hybrid (about a second per pass regardless of batch
+size) that was roughly 27 minutes per run on 85 basins, for a number the experiment never uses;
+`run_training.py --lean-tuning` now bounds it to about one window per basin. At batch 128 the
+hybrid trains at about 115 windows/s; earlier runs used batch 8 (about 8 windows/s).
