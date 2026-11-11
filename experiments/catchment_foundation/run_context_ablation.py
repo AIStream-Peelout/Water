@@ -29,7 +29,11 @@ from typing import Dict, List, Optional, Tuple
 HERE = os.path.dirname(os.path.abspath(__file__))
 WATER_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 
-HYBRID_FLAGS = ["--swe", "--anchored", "--no-multiplier", "--asos-gate", "--lean-tuning",
+# Pure-physics forcing: gridded precipitation only, no learned multiplier and no station term.
+# The station column (p01m) sums cumulative sub-hourly reports and so over-counts rain (about
+# twofold in many basins, hourly values up to 300 mm); the station gate would add that phantom
+# rain and, being a function of the context, would confound the comparison between arms.
+HYBRID_FLAGS = ["--swe", "--anchored", "--no-multiplier", "--lean-tuning",
                 "--production-init-fraction", "0.1", "--event-sample-power", "0",
                 "--loss", "huber", "--no-wandb"]
 CROSSFORMER_FLAGS = ["--loss", "huber", "--threads", "1", "--no-wandb"]
