@@ -163,3 +163,14 @@ loader one window per forward pass. For the hybrid (about a second per pass rega
 size) that was roughly 27 minutes per run on 85 basins, for a number the experiment never uses;
 `run_training.py --lean-tuning` now bounds it to about one window per basin. At batch 128 the
 hybrid trains at about 115 windows/s; earlier runs used batch 8 (about 8 windows/s).
+
+**Fold roles from here on.** Fold 0 of `basin_split_v1` is the development fold: the only bank
+with a held-out fold today (`FLEET_v10_f0_s42`) holds out fold 0, so the exploratory ablation
+scores on it. Fold 1 is reserved as the final test fold and must not be scored until the
+forecaster configuration is frozen; banks for the final comparison hold out both
+(`train_catchment_embeddings.py --holdout-fold 0 1`). The five-state cohort for that run is
+`manifests/fleet5_manifest_v1.json` (555 basins; built by `build_manifest.py
+--sites-from-split`). Known data issues there before it is used: station precipitation `p01m`
+averages 1.9× the gridded precipitation in PA and 1.27× in FL (near 1.0 in CO, UT, WY), 22 FL
+gauges are tidal (more than 1% negative flow), PA SNODAS series start in July 2017 and FL has
+none.
