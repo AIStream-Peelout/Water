@@ -385,3 +385,49 @@ to test are the ones where a static context has room: more training and a second
 learned-rows control (if a private vector per basin cannot help a trained model, nothing static
 can), the five-state cohort where regimes differ far more than within CO/UT, and operation
 without the observed-flow history.
+
+## 12. Longer-trained control (2026-11-11, seeds 43 and 44)
+
+Queue `ctxf0x3`: Crossformer only, arms none / learned rows / statics + signatures, up to 24
+epochs (three times §10) with patience 6, seeds 43 and 44. Six runs, 65–122 min each, 4 h 40 min
+in all at three at a time, peak 7.5 GB. Reports:
+`calibration/context_ablation_cout_f0/reports/crossformer_long_*.json`.
+
+**More training does not help the no-context model.** Early stopping picked epochs 9 and 17;
+against the 8-epoch run of §10 the longer runs score −0.6% and −0.2% all-lead on held-out basins
+and −0.7% and +0.6% on trained-on basins (intervals include zero), held-out median skill at
+day 8–14 +3.9% and +4.3% with 62–64% of basins beating persistence. The plateau is real at
+this learning rate and batch size; "undertrained" no longer explains the null result.
+
+**Seed noise.** Across the four no-context runs, all-lead differences stay within about ±1%;
+day 1–3 differs by up to 5% (seed 43 long: −5.4% on trained-on basins, winning on 13%).
+
+**Context arms against the same-seed no-context run**, per-basin log error ratio averaged over
+the two seeds, basin bootstrap (day 1–3 / 4–7 / 8–14 / all leads):
+
+| arm | held-out basins (53) | trained-on basins (83) |
+|---|---|---|
+| learned rows | +1.3 / −1.8 / −2.4 / −1.8% (−5.5 to +0.6) | −0.3 / −1.6 / −2.0 / −1.8% (−3.3 to +0.3) |
+| statics + signatures | −1.4 / +1.9 / **+3.4% (+0.2 to +7.2)** / +1.2% (−0.0 to +5.4) | −0.7 / −2.6 / −1.2 / −1.9% (−3.1 to −0.4) |
+
+Per seed, all leads: learned rows held-out +0.5% / −5.2%, trained-on −0.6% / −1.4%; statics +
+signatures held-out +0.8% / +1.0%, trained-on −3.2% / −1.4%. (Held-out basins get a zero context
+in the learned-rows arm, so its held-out row only shows what training with private rows does to
+the shared model.)
+
+Readings:
+1. **The decisive control is negative.** A private, freely trained vector for every training
+   basin does not improve forecasts on the very basins it was fitted to (−1.8%, interval −3.3 to
+   +0.3, worse on 58% of basins), at three times the training and on two more seeds. In this
+   setup nothing static — embedding, statics or an oracle per-basin vector — has room to help the
+   Crossformer: what distinguishes basins is already in the 30 days of observed flow and forcing
+   the model reads at every issue time.
+2. Statics + signatures show the only consistent positive sign: about +1% all-lead on held-out
+   basins in both seeds, +3.4% at day 8–14 with an interval just above zero, while being −1.9%
+   on trained-on basins. Under the rule of §8 this does not count (one band of three), and its
+   size is at the seed-noise level.
+3. Together with §9–§11: on CO/UT, gauged, 14-day hindcasts with 30 days of observed flow, a
+   better catchment representation cannot be expected to show up as forecast skill. A test that
+   can reward a representation has to remove what the context is competing with — forecasting
+   without the observed-flow history (the ungauged setting), or a cohort where regimes differ far
+   more (the five-state manifest) — and the learned-rows control should be rerun there first.
