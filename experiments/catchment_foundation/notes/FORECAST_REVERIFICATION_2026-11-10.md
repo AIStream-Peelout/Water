@@ -174,3 +174,49 @@ forecaster configuration is frozen; banks for the final comparison hold out both
 averages 1.9× the gridded precipitation in PA and 1.27× in FL (near 1.0 in CO, UT, WY), 22 FL
 gauges are tidal (more than 1% negative flow), PA SNODAS series start in July 2017 and FL has
 none.
+
+## 8. Exploratory context ablation on CO/UT, fold 0 held out: reading rules (written before results)
+
+Queue `ctxf0` (`run_context_ablation.py`, launched 2026-11-10 23:46, no run evaluated when this
+section was committed). Cohort: 140 CO/UT basins, 85 trained on (folds 1–4), 55 held out (fold 0,
+38 CO and 17 UT); training before 2022, checkpoint selection on the training basins' 2022 windows,
+scoring on 2023+. One seed per arm (42), plus a second seed of the no-context arm.
+
+- Hybrid: pure-physics forcing (gridded precipitation, no multiplier, no station term — the
+  station column over-counts rain, see below), production-store start 0.1, Huber loss, uniform
+  sampling, batch 128, up to 10 epochs of 8,192 windows. The context reaches the forecast only
+  through the GR4/snow parameter head.
+- Crossformer: static conditioning (`--context-mode tokens`), Huber loss, uniform sampling, batch
+  8, up to 8 epochs of 16,384 windows; one extra arm feeds the v10 context through the old
+  constant-series path.
+- Arms: none (zero context), `v10` (`FLEET_v10_f0_s42`: the encoder never trained on the held-out
+  basins, but each held-out basin's own pre-2022 flow goes into its embedding), `v10_shuffled`
+  (permuted within split labels), `v8ctl` (`FLEET_v8ctl_s42`: encoder trained on every basin, so
+  not held-out evidence), `statics` (105 physical GAGES-II attributes), `statics_signatures`
+  (+ 8 flow signatures from each basin's pre-2022 record), `learned_id` (a private trainable row
+  per training basin; meaningful on trained-on basins only).
+
+How the results will be read:
+1. The unit is the basin. Primary set: the held-out basins; trained-on basins are secondary.
+   Statistics per lead band: median basin skill, share of basins beating persistence, and for
+   each pair of arms the share of basins where one has lower error and the median per-basin
+   error reduction with a basin-bootstrap 95% interval (`forecast_diagnostics.py compare`).
+2. Noise floor first: the two seeds of the no-context arm, paired the same way. An arm-versus-arm
+   difference counts only if its interval excludes zero and it is clearly larger than that
+   seed-to-seed difference, in the same direction in at least two of the three lead bands.
+   Anything else is "not distinguishable at one seed" and waits for seeds 43 and 44.
+3. Questions in order: does any context beat none on held-out basins (statics, statics plus
+   signatures, v10); does the embedding's content matter (v10 against v10 shuffled); does the
+   embedding beat the hand-built contexts; what is the ceiling on trained-on basins (learned
+   rows against none); and for the Crossformer, does the context path matter (v10 through
+   tokens against v10 through constant series).
+4. Fold 0 is the development fold. Nothing here is a final test.
+
+**Station precipitation is over-counted.** `weather_scraping_functions.process_asos_csv` sums
+`p01m` over all reports in an hour, but `p01m` is cumulative since the hourly reset, so stations
+reporting more than once an hour are counted several times (2,593 / 2,621 / 2,751 mm per year
+against 1,251 / 1,122 / 945 gridded at three PA gauges; 743 against 341 at CO 07116500; hourly
+values up to 307 mm), and an all-missing hour is written as 0. The hybrid's station gate would
+add a share of that excess as rain and is a function of the context, so the hybrid arms run
+without it. `p01m` remains one of the Crossformer's nine inputs (standardized per basin) in every
+arm. Fixing the scraper and regenerating the column is a separate task.
