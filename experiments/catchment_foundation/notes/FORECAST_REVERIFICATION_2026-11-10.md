@@ -431,3 +431,102 @@ Readings:
    can reward a representation has to remove what the context is competing with — forecasting
    without the observed-flow history (the ungauged setting), or a cohort where regimes differ far
    more (the five-state manifest) — and the learned-rows control should be rerun there first.
+
+## 13. Why context did not help: the Crossformer does not use the weather (2026-11-12)
+
+Checks on the longer-trained no-context Crossformer (`ctxf0x3_cf_none_s43`), all evaluation-only.
+
+**It ignores every meteorological input** (`forecast_diagnostics.py inputs`). Swapping the
+horizon weather between windows, setting it to its mean, swapping the spin-up weather or all of
+it changes the forecasts by 0.0–0.1% of the model's own departure from persistence, and skill is
+identical to the decimal on trained-on and held-out basins. Flattening the flow history changes
+them by 58–67%. The model is persistence plus a drift read off the recent flow. Catchment context
+matters through how a basin turns weather into flow; a forecaster that never models that has
+nothing for a context to modulate. It is not an architectural limit: on a synthetic task whose
+target equals another input series over the horizon, the same Crossformer explains 98% of the
+variance within 400 steps.
+
+**Nothing stable per basin is left in its errors** (`forecast_diagnostics.py identity`,
+corrections fitted before 2022). Median error cut against the uncorrected model, all leads:
+
+| correction (needs only the basin's identity unless noted) | trained-on, 2022 | trained-on, 2023+ | held-out, 2023+ |
+|---|---|---|---|
+| per-basin mean residual profile | −5.5% | +0.4% | −0.4% |
+| the same by season | −5.5% | +1.8% | −0.6% |
+| pooled seasonal profile (no identity) | −4.8% | +2.5% | −0.0% |
+| per-basin amplitude of the predicted change | −0.3% | −0.3% | −0.3% |
+
+A season-only correction with no basin identity does as well as the per-basin ones, and all of
+them hurt in 2022. Climatology-of-change forecasts say the same from the data alone: a basin's
+own seasonal mean change scores +1.1% median skill on 2023+ against +2.6% for a pooled seasonal
+mean. This is why a private learned vector per basin (§12) could not help this model.
+
+**The data support far better forecasts** (`tabular_forecast_baseline.py`: gradient-boosted
+trees on daily features, band-mean flow change, same standardized units, same cohort and split).
+Median basin skill against persistence on the 53 held-out basins, 2023+, day 1–3 / 4–7 / 8–14:
+
+| forecaster | skill |
+|---|---|
+| no-context Crossformer, scored on band means | −9.9 / +1.6 / +4.7% |
+| trees: flow history and day of year | 13.6 / 18.6 / 31.1% |
+| trees: + weather (physical units) | 30.9 / 36.4 / 35.3% |
+| trees: + weather + snowpack | 33.4 / 41.5 / 41.6% |
+| trees: + weather standardized per basin, as the neural forecasters receive it | 7.0 / 10.4 / 20.5% |
+
+Weather roughly doubles the trees' skill at day 1–7, so the signal the Crossformer ignores is
+learnable. Standardizing the weather per basin destroys its value on unseen basins (−29 / −43 /
+−36% against physical units; only −6 to −9% on trained-on basins): a z-score of temperature or
+rain cannot be interpreted without the basin's own mean and spread.
+
+With a forecaster that uses the weather, context does matter on basins it was fitted on, and any
+identifier does it: statics, statics + signatures, v10, v10 shuffled and a categorical basin id
+all cut 2023+ error by 6–12% (10–25% in 2022). With 85 training basins none of it transfers:
+on held-out basins statics −5.5 / −3.0 / −5.0%, statics + signatures +1.5 / +0.3 / +2.7%, v10
+−4.6 / −4.6 / +0.2%, v10 shuffled −7.5 / −6.2 / −8.0%.
+
+## 14. Five-state cohort through the tree baseline (2026-11-12)
+
+`manifests/fleet5_manifest_v1.json` with fold 0 held out and the 22 tidal Florida gauges dropped
+(`calibration/context_ablation_fleet5_f0/`): 403 training basins, 130 held out (123 with data
+after 2022; 18,166 held-out forecasts in 2023+). Fitted on every third training row (297,770).
+Reports: `calibration/context_ablation_fleet5_f0/reports/tabular_seed0*.json`.
+
+Held-out basins, 2023+, median skill at day 1–3 / 4–7 / 8–14 and error cut against
+"flow + weather + snowpack" (basin-bootstrap 95% interval):
+
+| features | skill | error cut |
+|---|---|---|
+| flow history | 18.7 / 21.1 / 35.1% | |
+| + weather | 37.3 / 48.4 / 58.5% | |
+| + weather + snowpack (reference) | 39.6 / 49.8 / 58.3% | |
+| + weather standardized per basin | 12.8 / 16.3 / 25.5% | −39 / −56 / −67% |
+| reference + statics | 40.9 / 50.8 / 61.3% | +3.0 (−1,+4) / +3.2 (+1,+6) / +4.6 (+3,+7) |
+| reference + 8 flow signatures | 41.1 / 51.8 / 61.3% | +5.4 (+3,+10) / +6.8 (+5,+10) / +6.0 (+5,+7) |
+| reference + statics + signatures | 40.4 / 53.1 / 64.2% | **+6.2 (+3,+9) / +8.4 (+6,+11) / +9.1 (+7,+12)** |
+| reference + v10 embedding | 37.4 / 47.0 / 58.9% | −2.7 (−5,−0) / −1.2 (−3,+0) / −0.5 (−2,+1) |
+| reference + v10, 16 principal components | 38.0 / 48.0 / 57.9% | −0.2 / −1.4 / −0.8 |
+| reference + v10 shuffled | 37.0 / 47.2 / 56.7% | −2.5 / −3.5 / −4.0 |
+
+Paired directly on held-out basins: v10 against statics + signatures −8.1 (−11,−5) / −9.9
+(−13,−8) / −9.6% (−12,−8); v10 components added to statics + signatures −0.4 / +0.5 / −0.1%; v10
+against its shuffled twin −0.6 / +2.2 (+1,+4) / +3.7% (+2,+5). The 2022 year agrees: statics +
+signatures +2.1 / +6.9 / +6.0%, v10 −0.0 / −2.6 / +0.5%. On trained-on basins statics +
+signatures give +9.1 / +9.7 / +13.0%, v10 +4.8 / +5.6 / +8.2%, v10 shuffled +1.5 / +2.4 / +3.9%.
+
+Readings:
+1. Sample size and diversity were the limit on transfer: with 403 basins in five states a
+   hand-built context improves forecasts on basins the model never saw, in every lead band and
+   in both periods. With 85 CO/UT basins it did not.
+2. Most of that gain is the eight flow signatures computed from the basin's own earlier record;
+   physical statics alone give about half as much (the ungauged case).
+3. The v10 embedding carries a little transferable information (it beats its own permutation by
+   2–4% at day 4–14) but adds nothing over no context, nothing on top of statics + signatures,
+   and is 8–10% worse than them. It was built from the same flow record the signatures come from.
+4. The bar for any new representation is now explicit and cheap to test: beat statics +
+   signatures here for gauged basins, and beat statics alone for ungauged ones.
+
+The Crossformer five-state arms were prepared but not run: a pilot (Mac GPU, batch 64, station
+rain excluded) took 19 min for two epochs including 16–17 min of loading and evaluation, about
+12 GB; a full run would be about an hour, one at a time. Running context arms on a forecaster
+that ignores the weather would repeat §10–§12; making it use the weather comes first, with the
+tree baseline's held-out skill (40 / 50 / 58%) as the mark to reach.
