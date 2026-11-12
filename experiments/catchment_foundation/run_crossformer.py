@@ -31,7 +31,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -53,7 +53,8 @@ def build_crossformer_params(
         input_clip: Optional[float] = 20.0, loss: str = "mse",
         huber_beta: float = 1.0, residual_smoothing_hours: int = 1,
         nonnegative: bool = False, event_sample_power: float = 0.0,
-        require_pretrained_embedding: bool = True, context_mode: str = "channels") -> Dict:
+        require_pretrained_embedding: bool = True, context_mode: str = "channels",
+        exclude_inputs: Sequence[str] = (), device: Optional[str] = None) -> Dict:
     """
     Builds an FF-native config for the direct multi-basin Crossformer.
 
@@ -111,16 +112,27 @@ def build_crossformer_params(
         ``"tokens"`` passes it as the Crossformer's static covariates (added to every token),
         defaults to ``"channels"``.
     :type context_mode: str, optional
+    :param exclude_inputs: Meteorological input columns to leave out (for example ``p01m``, the
+        station precipitation, while its hourly aggregation is being repaired), defaults to none.
+    :type exclude_inputs: Sequence[str], optional
+    :param device: Torch device handed to Flow Forecast (``"mps"``, ``"cpu"``, ...); None keeps
+        the framework default.
+    :type device: str, optional
     :return: Resolved Flow Forecast configuration.
     :rtype: Dict
     """
+    unknown = sorted(set(exclude_inputs) - set(SCALED_COLS))
+    if unknown:
+        raise ValueError("cannot exclude %s; excludable inputs are %s" % (unknown, SCALED_COLS))
+    relevant_cols = [column for column in DIRECT_RELEVANT_COLS if column not in exclude_inputs]
+    scaled_cols = [column for column in SCALED_COLS if column not in exclude_inputs]
     forcing_tag = "hindcast_forcing" if use_future_forcing else "history_only"
     context_tag = "catchment_context" if context_channels else "no_catchment_context"
     params = {
         "model_name": "CrossformerMultiBasin",
         "model_type": "PyTorch",
         "model_params": {
-            "n_time_series": len(DIRECT_RELEVANT_COLS) + 1,
+            "n_time_series": len(relevant_cols) + 1,
             "spinup_length": SPINUP_HOURS,
             "forecast_length": HORIZON_HOURS,
             "basin_info_path": manifest_path,
@@ -149,8 +161,8 @@ def build_crossformer_params(
             "forecast_history": SPINUP_HOURS,
             "forecast_length": HORIZON_HOURS,
             "target_col": ["cfs"],
-            "relevant_cols": DIRECT_RELEVANT_COLS,
-            "scaled_cols": SCALED_COLS,
+            "relevant_cols": relevant_cols,
+            "scaled_cols": scaled_cols,
             "window_stride": 72,
             "min_valid_fraction": 0.95,
             "train_basin_split": "train",
@@ -187,6 +199,8 @@ def build_crossformer_params(
     }
     if loss == "huber":
         params["training_params"]["criterion_params"] = {"beta": huber_beta}
+    if device:
+        params["device"] = device
     if context_mode != "channels":
         # Written only when it differs, so configs stay loadable by older Flow Forecast checkouts.
         params["model_params"]["context_mode"] = context_mode
@@ -226,6 +240,10 @@ def main() -> None:
     parser.add_argument("--context-mode", choices=("channels", "tokens"), default="channels",
                         help="How the context reaches the model: constant input series, or "
                              "static covariates added to every token")
+    parser.add_argument("--exclude-inputs", nargs="*", default=[],
+                        help="Meteorological input columns to leave out, e.g. p01m")
+    parser.add_argument("--device", default=None,
+                        help="Torch device for Flow Forecast (mps, cpu, cuda); default: its own choice")
     parser.add_argument("--history-only", action="store_true",
                         help="Do not expose realized horizon meteorology to the model")
     parser.add_argument("--input-clip", type=float, default=20.0,
@@ -278,7 +296,8 @@ def main() -> None:
         nonnegative=args.nonnegative,
         event_sample_power=args.event_sample_power,
         require_pretrained_embedding=not args.allow_missing_embeddings,
-        context_mode=args.context_mode)
+        context_mode=args.context_mode, exclude_inputs=args.exclude_inputs,
+        device=args.device)
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(params, f, indent=1)
 
