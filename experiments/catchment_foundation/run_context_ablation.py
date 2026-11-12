@@ -21,6 +21,7 @@ Example::
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -46,7 +47,7 @@ def run_name(tag: str, model: str, arm: str, seed: int) -> str:
 
 
 def build_command(python: str, model: str, arm: str, seed: int, name: str, manifests: Dict,
-                  budget: Dict) -> List[str]:
+                  budget: Dict, extra_flags: Optional[List[str]] = None) -> List[str]:
     """
     Builds the launcher command of one job.
 
@@ -64,6 +65,8 @@ def build_command(python: str, model: str, arm: str, seed: int, name: str, manif
     :type manifests: Dict
     :param budget: Per-model ``epochs``, ``samples``, ``batch``, ``lr`` and ``patience``.
     :type budget: Dict
+    :param extra_flags: Further launcher flags for every run of this model, defaults to None.
+    :type extra_flags: List[str], optional
     :return: The argument vector.
     :rtype: List[str]
     """
@@ -75,7 +78,7 @@ def build_command(python: str, model: str, arm: str, seed: int, name: str, manif
     common = ["--name", name, "--manifest", manifests[base_arm], "--seed", str(seed),
               "--epochs", str(budget["epochs"]), "--samples-per-epoch", str(budget["samples"]),
               "--batch-size", str(budget["batch"]), "--lr", str(budget["lr"]),
-              "--patience", str(budget["patience"])]
+              "--patience", str(budget["patience"])] + list(extra_flags or [])
     if model == "hybrid":
         command = [python, os.path.join(HERE, "run_training.py")] + common + HYBRID_FLAGS
         if base_arm != "learned_id":
@@ -179,6 +182,11 @@ def main() -> None:
                                                    "patience=3")
     parser.add_argument("--crossformer-budget", default="epochs=8,samples=16384,batch=8,"
                                                         "lr=1e-3,patience=4")
+    parser.add_argument("--hybrid-flags", default="",
+                        help="Extra run_training.py flags for every hybrid run (one string)")
+    parser.add_argument("--crossformer-flags", default="",
+                        help="Extra run_crossformer.py flags for every Crossformer run, e.g. "
+                             "'--device mps --exclude-inputs p01m'")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -186,6 +194,8 @@ def main() -> None:
         manifests = json.load(file)["manifests"]
     budgets = {"hybrid": dict(item.split("=") for item in args.hybrid_budget.split(",")),
                "crossformer": dict(item.split("=") for item in args.crossformer_budget.split(","))}
+    extras = {"hybrid": shlex.split(args.hybrid_flags),
+              "crossformer": shlex.split(args.crossformer_flags)}
     python = os.environ.get("PY", sys.executable)
     combos = [(arm, seed) for seed in args.seeds for arm in (args.arms or list(manifests))]
     combos += [(item.rpartition(":")[0], int(item.rpartition(":")[2])) for item in args.extra]
@@ -195,7 +205,8 @@ def main() -> None:
             if arm.endswith("@channels") and model != "crossformer":
                 continue
             name = run_name(args.tag, model, arm, seed)
-            command = build_command(python, model, arm, seed, name, manifests, budgets[model])
+            command = build_command(python, model, arm, seed, name, manifests, budgets[model],
+                                    extra_flags=extras[model])
             if is_done(name):
                 print("[skip] %s already evaluated" % name)
             else:
