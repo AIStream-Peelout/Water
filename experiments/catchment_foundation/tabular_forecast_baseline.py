@@ -12,8 +12,10 @@ per-basin standardized units the neural forecasters use; skill is against persis
   forecasters), in physical units; ``weather_z`` is the same standardized per basin;
 * ``snow``    - basin snow water equivalent on the issue day (SNODAS, where a series exists);
 * a context bank written by ``prepare_context_ablation.py`` (statics, statics + signatures, an
-  embedding, its shuffled twin), or ``basin_id`` (a categorical identifier: meaningful only on
-  basins the model was fitted on).
+  embedding, its shuffled twin), ``signatures`` alone, ``<bank>_pca<k>`` (the bank reduced to k
+  principal components fitted on the training basins, so a wide embedding is not penalized for
+  its width), or ``basin_id`` (a categorical identifier: meaningful only on basins the model was
+  fitted on).
 
 It trains in minutes on CPU, so it is the quick way to ask whether a context carries forecast
 value before spending neural-network runs on the question. Everything is fitted on the training
@@ -41,6 +43,7 @@ WEATHER = [f"{v}_prev{n}" for v in ("p", "t", "sw", "pet") for n in (7, 30)]
 WEATHER += [f"{v}_{band}" for band in BANDS for v in ("p", "t", "sw")]
 SNOW = ["swe0"]
 CFS_TO_MM_HR = 0.0283168 * 3.6
+MAX_CATEGORIES = 255
 
 ARMS = {
     "flow": ("flow",),
@@ -53,7 +56,12 @@ ARMS = {
     "flow+weather+snow+v10_shuffled": ("flow", "weather", "snow", "v10_shuffled"),
     "flow+weather+snow+basin_id": ("flow", "weather", "snow", "basin_id"),
     "flow+statics_signatures": ("flow", "statics_signatures"),
+    "flow+weather+snow+signatures": ("flow", "weather", "snow", "signatures"),
+    "flow+weather+snow+v10_pca16": ("flow", "weather", "snow", "v10_pca16"),
+    "flow+weather+snow+statics_signatures+v10_pca16": ("flow", "weather", "snow",
+                                                       "statics_signatures", "v10_pca16"),
 }
+N_SIGNATURES = 8      # prepare_context_ablation.py appends the flow signatures after the statics
 REFERENCE = "flow+weather+snow"
 
 
@@ -189,10 +197,28 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
             block = ((data[WEATHER].to_numpy() - mean) / np.where(std > 0, std, 1.0))
             block = block.astype(np.float32)
         elif group == "basin_id":
-            fitted = set(data.loc[fit_rows, "site_id"])
-            codes = data.site_id.astype("category").cat.codes.to_numpy(np.float32)
-            codes[~data.site_id.isin(fitted).to_numpy()] = np.nan
-            block = codes[:, None]
+            fitted = sorted(set(data.loc[fit_rows, "site_id"]))
+            codes = data.site_id.map({site: i for i, site in enumerate(fitted)})
+            codes = codes.to_numpy(np.float32)      # NaN for basins the model is not fitted on
+            if len(fitted) <= MAX_CATEGORIES:
+                block = codes[:, None]
+            else:
+                # The tree library caps a categorical feature at 255 levels: split the
+                # identifier into two digits, which two tree splits recombine.
+                base = int(np.ceil(np.sqrt(len(fitted))))
+                block = np.stack([codes // base, codes % base], axis=1)
+        elif group == "signatures":
+            bank = load_bank(arms_dir, "statics_signatures").iloc[:, -N_SIGNATURES:]
+            block = bank.reindex(data.site_id).to_numpy(np.float32)
+        elif "_pca" in group:
+            name, _, components = group.rpartition("_pca")
+            bank = load_bank(arms_dir, name)
+            fitted = bank.loc[bank.index.intersection(sorted(set(data.loc[fit_rows, "site_id"])))]
+            centre = fitted.to_numpy().mean(axis=0)
+            _, _, axes = np.linalg.svd(fitted.to_numpy() - centre, full_matrices=False)
+            reduced = pd.DataFrame((bank.to_numpy() - centre) @ axes[:int(components)].T,
+                                   index=bank.index)
+            block = reduced.reindex(data.site_id).to_numpy(np.float32)
         else:
             block = load_bank(arms_dir, group).reindex(data.site_id).to_numpy(np.float32)
         blocks.append(block)
@@ -254,7 +280,7 @@ def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2
 
 
 def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int, seed: int,
-        output: Optional[str]) -> Dict:
+        output: Optional[str], reference: Optional[str] = None) -> Dict:
     """Fits every requested arm and prints and returns the scores."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     data = pd.read_pickle(data_path)
@@ -276,7 +302,7 @@ def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int,
         print("fitted %-40s %3d features  %4.0f s" % (arm, matrix.shape[1], time.time() - started),
               flush=True)
         del matrix
-    reference = REFERENCE if REFERENCE in arm_names else arm_names[0]
+    reference = reference or (REFERENCE if REFERENCE in arm_names else arm_names[0])
     report = {"data": os.path.abspath(data_path), "reference": reference, "seed": seed,
               "scores": score(data, predictions, reference)}
     for split, periods in report["scores"].items():
@@ -321,12 +347,15 @@ def main() -> None:
     runner.add_argument("--fit-subsample", type=int, default=1,
                         help="Keep every n-th fitting row (large cohorts)")
     runner.add_argument("--seed", type=int, default=0)
+    runner.add_argument("--reference", default=None, choices=list(ARMS),
+                        help="Arm every other arm is paired against (default: %s)" % REFERENCE)
     runner.add_argument("--output", default=None)
     args = parser.parse_args()
     if args.command == "build":
         build(args.manifest, args.out, args.fit_stride, args.eval_stride)
     else:
-        run(args.data, args.arms_dir, args.arms, args.fit_subsample, args.seed, args.output)
+        run(args.data, args.arms_dir, args.arms, args.fit_subsample, args.seed, args.output,
+            reference=args.reference)
 
 
 if __name__ == "__main__":
