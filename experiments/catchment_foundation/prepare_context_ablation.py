@@ -172,7 +172,8 @@ def _write_arm(base: Dict, sites: List[str], contexts: np.ndarray, label: str, o
 
 def prepare(base_manifest: str, split_path: str, holdout_folds: List[int], dev_folds: List[int],
             banks: Dict[str, str], shuffle: Optional[str], records_dir: Optional[str],
-            signatures_csv: Optional[str], output_dir: str, width: int, seed: int) -> Dict:
+            signatures_csv: Optional[str], output_dir: str, width: int, seed: int,
+            max_negative_flow_fraction: Optional[float] = None) -> Dict:
     """
     Writes every arm's bank and manifest and returns the design summary.
 
@@ -198,6 +199,9 @@ def prepare(base_manifest: str, split_path: str, holdout_folds: List[int], dev_f
     :type width: int
     :param seed: Shuffle seed.
     :type seed: int
+    :param max_negative_flow_fraction: Drop basins whose manifest ``negative_flow_fraction``
+        exceeds this (tidal or backwater gauges, where flow is not discharge), defaults to None.
+    :type max_negative_flow_fraction: float, optional
     :return: The design summary (also written to ``design.json``).
     :rtype: Dict
     """
@@ -207,6 +211,12 @@ def prepare(base_manifest: str, split_path: str, holdout_folds: List[int], dev_f
     with open(split_path) as file:
         folds = {site: info["fold"] for site, info in json.load(file)["sites"].items()}
     basins = assign_splits(source["basins"], folds, holdout_folds, dev_folds)
+    dropped_negative = []
+    if max_negative_flow_fraction is not None:
+        limit = max_negative_flow_fraction
+        dropped_negative = sorted(basin["site_id"] for basin in basins
+                                  if basin.get("negative_flow_fraction", 0.0) > limit)
+        basins = [basin for basin in basins if basin["site_id"] not in set(dropped_negative)]
 
     loaded = {label: torch.load(path, map_location="cpu", weights_only=False)
               for label, path in banks.items()}
@@ -272,6 +282,7 @@ def prepare(base_manifest: str, split_path: str, holdout_folds: List[int], dev_f
     design = {
         "base_manifest": os.path.abspath(base_manifest), **metadata,
         "basins": len(sites),
+        "dropped_for_negative_flow": dropped_negative,
         "split_counts": dict(Counter(labels)),
         "state_by_split": {split: dict(Counter(b.get("state", "unknown") for b in basins
                                                if b["split"] == split))
@@ -303,13 +314,16 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--context-width", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-negative-flow-fraction", type=float, default=None,
+                        help="Drop basins with a larger share of negative (tidal) flow")
     args = parser.parse_args()
     banks = dict(args.bank)
     if args.shuffle and args.shuffle not in banks:
         parser.error("--shuffle must name one of the --bank labels")
     design = prepare(args.base_manifest, args.split, args.holdout_folds, args.dev_folds, banks,
                      args.shuffle, args.records_dir, args.signatures, args.output_dir,
-                     args.context_width, args.seed)
+                     args.context_width, args.seed,
+                     max_negative_flow_fraction=args.max_negative_flow_fraction)
     print(json.dumps({key: value for key, value in design.items() if key != "manifests"},
                      indent=1))
     for label, path in design["manifests"].items():
