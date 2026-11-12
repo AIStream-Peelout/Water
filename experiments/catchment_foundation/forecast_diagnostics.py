@@ -1,7 +1,7 @@
 """
 Evaluation-only checks of whether a multi-basin forecaster can reward a better catchment context.
 
-Nothing here trains a model. Three questions, one subcommand each:
+Nothing here trains a model. One question per subcommand:
 
 ``context``
     Does a trained checkpoint react to its catchment context? The same evaluation windows are
@@ -19,6 +19,15 @@ Nothing here trains a model. Three questions, one subcommand each:
     How do several finished runs rank on the same evaluation windows? Reads the unrounded
     per-basin errors each run's evaluation saved and pairs every run with a reference run basin
     by basin (for example every context arm against the no-context arm).
+
+``inputs``
+    Does a trained Crossformer use the weather it is given? The meteorology of the horizon, the
+    spin-up or the whole window is swapped between windows, and the flow history is flattened.
+
+``identity``
+    Is there anything stable per basin left for a context to add? Corrections that use only the
+    basin's identity (its mean residual profile, by season, its amplitude) are fitted before the
+    cutoff and applied to later forecasts, next to climatology-of-change forecasts.
 
 ``audit``
     Is a finished run's headline number trustworthy? Puts the validation number that drove early
@@ -584,6 +593,236 @@ def _print_comparison(report: Dict) -> None:
                 entry["basins_beating_persistence_pct"], paired))
 
 
+def input_sensitivity(run_dir: str, checkpoint: Optional[str], basin_split: str,
+                      start_date: str, stride: int, seed: int) -> Dict:
+    """
+    Re-runs a Crossformer checkpoint with groups of its inputs replaced.
+
+    The meteorology of the horizon, of the spin-up or of the whole window is swapped between
+    windows (or set to its standardized mean), and the flow history is flattened to its last
+    value. A forecaster that uses an input group must change its forecasts when that group is
+    replaced; one that does not is not using it.
+
+    :param run_dir: A completed ``CrossformerMultiBasin`` run directory.
+    :type run_dir: str
+    :param checkpoint: Optional state_dict path; defaults to the run's best checkpoint.
+    :type checkpoint: str, optional
+    :param basin_split: Manifest split label of the basins to evaluate.
+    :type basin_split: str
+    :param start_date: First evaluation date.
+    :type start_date: str
+    :param stride: Hours between evaluation windows.
+    :type stride: int
+    :param seed: Seed of the window permutation.
+    :type seed: int
+    :return: Per-intervention skill per band and the forecast change relative to the model's
+        own departure from persistence.
+    :rtype: Dict
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    model, config, manifest_path = _load_run_model(run_dir, checkpoint)
+    if config["model_name"] != "CrossformerMultiBasin":
+        raise SystemExit("input interventions are defined for CrossformerMultiBasin runs only")
+    dataset = config["dataset_params"]
+    loader = _build_loader(manifest_path, dataset, basin_split, start_date, None, stride)
+    spinup = dataset["forecast_history"]
+    weather = list(range(1, len(dataset["relevant_cols"])))
+    generator = torch.Generator().manual_seed(seed)
+    local = {position: index for index, position in enumerate(loader.basin_positions)}
+
+    def variants(src):
+        order = torch.randperm(src.shape[0], generator=generator)
+        swapped_horizon, mean_horizon = src.clone(), src.clone()
+        swapped_spinup, swapped_all, flat_flow = src.clone(), src.clone(), src.clone()
+        swapped_horizon[:, spinup:, weather] = src[order][:, spinup:, weather]
+        mean_horizon[:, spinup:, weather] = 0.0
+        swapped_spinup[:, :spinup, weather] = src[order][:, :spinup, weather]
+        swapped_all[:, :, weather] = src[order][:, :, weather]
+        flat_flow[:, :spinup - 1, 0] = src[:, spinup - 1:spinup, 0]
+        return {"original": src, "horizon_weather_swapped": swapped_horizon,
+                "horizon_weather_mean": mean_horizon, "spinup_weather_swapped": swapped_spinup,
+                "all_weather_swapped": swapped_all, "flow_history_flattened": flat_flow}
+
+    sims, observed, persistence, basins = {}, [], [], []
+    with torch.no_grad():
+        for src, trg in DataLoader(loader, batch_size=128, shuffle=True, generator=generator):
+            positions = src[:, 0, -1].long()
+            scale = model.flow_scales[positions].unsqueeze(1)
+            for label, inputs in variants(src).items():
+                sims.setdefault(label, []).append((model(inputs) * scale).double())
+            observed.append((trg[:, :, 0] * scale).double())
+            persistence.append(src[:, spinup - 1, 0:1].expand(-1, trg.shape[1]).double())
+            basins.append(torch.tensor([local[int(p)] for p in positions]))
+    reference = {"obs": torch.cat(observed).numpy(), "persist": torch.cat(persistence).numpy(),
+                 "basin": torch.cat(basins).numpy(), "sites": list(loader.basin_site_ids)}
+    sims = {label: torch.cat(parts).numpy() for label, parts in sims.items()}
+    departure = float(np.sqrt(((sims["original"] - reference["persist"]) ** 2).mean()))
+    return {
+        "run_dir": os.path.abspath(run_dir), "basin_split": basin_split,
+        "basins": len(reference["sites"]), "windows": int(sims["original"].shape[0]),
+        "forecast_change_pct_of_departure": {
+            label: float(100.0 * np.sqrt(((sim - sims["original"]) ** 2).mean()) / departure)
+            for label, sim in sims.items() if label != "original"},
+        "bands": _band_table(sims, reference, "original"),
+    }
+
+
+def identity_corrections(fit: Dict, evaluation: Dict, pooled: Dict, shrink: float = 5.0) -> Dict:
+    """
+    Applies corrections that need nothing but the basin's identity to later forecasts.
+
+    Fitted on ``fit`` (windows before the cutoff), applied to ``evaluation``. All arrays are in
+    per-basin standardized units: ``sim``/``obs`` of shape (windows, horizon), ``per`` (windows,)
+    the persistence value, ``basin`` and ``month`` per window.
+
+    * ``offset``: the basin's mean residual profile is added to the forecast;
+    * ``seasonal_offset``: the same per three-month window around the issue month, shrunk
+      toward the basin's overall profile when few windows support it;
+    * ``pooled_seasonal_offset``: the seasonal residual profile of all basins in ``pooled``
+      (no basin identity; the control);
+    * ``amplitude``: the forecast's departure from persistence is rescaled per basin;
+    * ``climatology_pooled`` / ``climatology_basin`` / ``climatology_basin_season``: persistence
+      plus the mean observed change (no model at all).
+
+    :param fit: Forecasts and observations before the cutoff.
+    :type fit: Dict
+    :param evaluation: Forecasts and observations to correct.
+    :type evaluation: Dict
+    :param pooled: Pre-cutoff windows of the training basins, for the identity-free variants.
+    :type pooled: Dict
+    :param shrink: Pseudo-count pulling seasonal profiles toward the basin's overall profile.
+    :type shrink: float, optional
+    :return: Variant name -> corrected forecasts of the evaluation windows.
+    :rtype: Dict
+    """
+    def near(months: np.ndarray, month: int) -> np.ndarray:
+        return np.isin(months, [(month - 2) % 12 + 1, month, month % 12 + 1])
+
+    pooled_residual = pooled["obs"] - pooled["sim"]
+    pooled_change = pooled["obs"] - pooled["per"][:, None]
+    horizon = evaluation["sim"].shape[1]
+    zero = np.zeros(horizon)
+    season_residual = {m: pooled_residual[near(pooled["month"], m)].mean(axis=0)
+                       if near(pooled["month"], m).any() else zero for m in range(1, 13)}
+    season_change = {m: pooled_change[near(pooled["month"], m)].mean(axis=0)
+                     if near(pooled["month"], m).any() else zero for m in range(1, 13)}
+    names = ("offset", "seasonal_offset", "pooled_seasonal_offset", "amplitude",
+             "climatology_pooled", "climatology_basin", "climatology_basin_season")
+    out = {name: evaluation["sim"].copy() for name in names}
+    persistence = evaluation["per"][:, None]
+    for basin in np.unique(evaluation["basin"]):
+        rows = np.flatnonzero(evaluation["basin"] == basin)
+        own = fit["basin"] == basin
+        if own.any():
+            residual = fit["obs"][own] - fit["sim"][own]
+            change = fit["obs"][own] - fit["per"][own][:, None]
+            predicted = fit["sim"][own] - fit["per"][own][:, None]
+            basin_residual, basin_change = residual.mean(axis=0), change.mean(axis=0)
+            scale = float(np.clip((change * predicted).sum() / max((predicted ** 2).sum(), 1e-12),
+                                  0.0, 5.0))
+        else:
+            residual = change = np.zeros((0, horizon))
+            basin_residual = basin_change = zero
+            scale = 1.0
+        for row in rows:
+            month = int(evaluation["month"][row])
+            chosen = near(fit["month"][own], month) if own.any() else np.zeros(0, dtype=bool)
+            weight = chosen.sum() / (chosen.sum() + shrink)
+            local_residual = residual[chosen].mean(axis=0) if chosen.any() else basin_residual
+            local_change = change[chosen].mean(axis=0) if chosen.any() else basin_change
+            forecast = evaluation["sim"][row]
+            out["offset"][row] = forecast + basin_residual
+            blended = weight * local_residual + (1.0 - weight) * basin_residual
+            out["seasonal_offset"][row] = forecast + blended
+            out["pooled_seasonal_offset"][row] = forecast + season_residual[month]
+            out["amplitude"][row] = persistence[row] + scale * (forecast - persistence[row])
+            out["climatology_pooled"][row] = persistence[row] + season_change[month]
+            out["climatology_basin"][row] = persistence[row] + basin_change
+            blended = weight * local_change + (1.0 - weight) * basin_change
+            out["climatology_basin_season"][row] = persistence[row] + blended
+    return out
+
+
+def identity_headroom(run_dir: str, checkpoint: Optional[str], basin_split: str,
+                      fit_stride: int, stride: int) -> Dict:
+    """
+    Bounds what a static per-basin context could add to a trained forecaster.
+
+    Collects the checkpoint's forecasts before the cutoff, in the validation year and afterwards,
+    then scores :func:`identity_corrections` on the two later periods. If corrections that use
+    only the basin's identity do not reduce later error, there is nothing stable per basin for a
+    context to supply.
+
+    :param run_dir: A completed run directory.
+    :type run_dir: str
+    :param checkpoint: Optional state_dict path; defaults to the run's best checkpoint.
+    :type checkpoint: str, optional
+    :param basin_split: Manifest split label of the basins to correct.
+    :type basin_split: str
+    :param fit_stride: Hours between the pre-cutoff windows the corrections are fitted on.
+    :type fit_stride: int
+    :param stride: Hours between evaluation windows.
+    :type stride: int
+    :return: Per period and band, each variant's median basin skill and its paired error cut
+        against the uncorrected model.
+    :rtype: Dict
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    model, config, manifest_path = _load_run_model(run_dir, checkpoint)
+    dataset = config["dataset_params"]
+    spinup = dataset["forecast_history"]
+
+    def collect(split: str, start: Optional[str], end: Optional[str], step: int) -> Dict:
+        loader = _build_loader(manifest_path, dataset, split, start, end, step)
+        local = {position: index for index, position in enumerate(loader.basin_positions)}
+        sims, observed, persistence, basins, months = [], [], [], [], []
+        window = 0
+        with torch.no_grad():
+            for src, trg in DataLoader(loader, batch_size=128, shuffle=False):
+                positions = src[:, 0, -1].long()
+                sims.append(model(src).double())
+                observed.append(trg[:, :, 0].double())
+                persistence.append((src[:, spinup - 1, 0] / model.flow_scales[positions]).double())
+                for position in positions:
+                    basin, index = loader.locate(window)
+                    issue = loader.basin_loaders[basin].valid_starts[index] + spinup
+                    months.append(loader.basin_timestamps[basin][issue].month)
+                    basins.append(loader.basin_site_ids[local[int(position)]])
+                    window += 1
+        return {"sim": torch.cat(sims).numpy(), "obs": torch.cat(observed).numpy(),
+                "per": torch.cat(persistence).numpy(), "basin": np.array(basins),
+                "month": np.array(months)}
+
+    cutoff, later = dataset["train_end_date"], dataset["test_start_date"]
+    fit = collect(basin_split, None, cutoff, fit_stride)
+    pooled = fit if basin_split == dataset["train_basin_split"] else collect(
+        dataset["train_basin_split"], None, cutoff, fit_stride)
+    report = {"run_dir": os.path.abspath(run_dir), "basin_split": basin_split, "periods": {}}
+    for label, start, end in (("validation_year", cutoff, later), ("later_years", later, None)):
+        evaluation = collect(basin_split, start, end, stride)
+        variants = dict(identity_corrections(fit, evaluation, pooled), model=evaluation["sim"])
+        sites = sorted(set(evaluation["basin"]))
+        index = np.array([sites.index(basin) for basin in evaluation["basin"]])
+        flat = np.repeat(evaluation["per"][:, None], evaluation["sim"].shape[1], axis=1)
+        entry = {"basins": len(sites), "windows": int(len(index)), "bands": {}}
+        for band, (first, last) in BANDS.items():
+            persistence_error = basin_error_sums(flat, evaluation["obs"], index, len(sites),
+                                                 first, last)
+            errors = {name: basin_error_sums(series, evaluation["obs"], index, len(sites),
+                                             first, last) for name, series in variants.items()}
+            entry["bands"][band] = {}
+            for name, error in errors.items():
+                stats = skill_summary(error, persistence_error)
+                if name != "model":
+                    stats["versus_model"] = paired_summary(error, errors["model"],
+                                                           persistence_error)
+                entry["bands"][band][name] = stats
+        report["periods"][label] = entry
+    return report
+
+
 def _parse_labelled_path(specification: str) -> Tuple[str, str]:
     """Parses ``label=/path`` CLI values."""
     label, separator, path = specification.partition("=")
@@ -628,7 +867,18 @@ def main() -> None:
     compare.add_argument("--reference", required=True, help="Label of the reference run")
     compare.add_argument("--split", default="ungauged_2023")
 
-    for sub in (context, headroom, audit, compare):
+    inputs = commands.add_parser("inputs", help="input-group interventions on a Crossformer")
+    identity = commands.add_parser("identity", help="headroom of identity-only corrections")
+    for sub in (inputs, identity):
+        sub.add_argument("--run-dir", required=True)
+        sub.add_argument("--checkpoint", default=None)
+        sub.add_argument("--basin-split", default="train")
+        sub.add_argument("--stride", type=int, default=336)
+    inputs.add_argument("--start-date", default="2023-01-01")
+    inputs.add_argument("--seed", type=int, default=0)
+    identity.add_argument("--fit-stride", type=int, default=216)
+
+    for sub in (context, headroom, audit, compare, inputs, identity):
         sub.add_argument("--output", default=None, help="Optional JSON report path")
     args = parser.parse_args()
 
@@ -648,6 +898,32 @@ def main() -> None:
         print("production-store init fraction %.2f: %d basins, %d windows"
               % (report["production_init_fraction"], report["basins"], report["windows"]))
         _print_table(report["bands"], "calibrated")
+    elif args.command == "inputs":
+        report = input_sensitivity(args.run_dir, args.checkpoint, args.basin_split,
+                                   args.start_date, args.stride, args.seed)
+        print("%d basins, %d windows" % (report["basins"], report["windows"]))
+        _print_table(report["bands"], "original")
+        print("\nforecast change as a share of the model's own departure from persistence:")
+        for label, value in report["forecast_change_pct_of_departure"].items():
+            print("  %-26s %.1f%%" % (label, value))
+    elif args.command == "identity":
+        report = identity_headroom(args.run_dir, args.checkpoint, args.basin_split,
+                                   args.fit_stride, args.stride)
+        for period, entry in report["periods"].items():
+            print("\n%s: %d basins, %d windows (median skill %% | error cut vs the model %%, "
+                  "share of basins improved)" % (period, entry["basins"], entry["windows"]))
+            print("  %-26s" % "variant" + "".join("%24s" % band for band in BANDS))
+            for name in entry["bands"]["all"]:
+                line = "  %-26s" % name
+                for band in BANDS:
+                    stats = entry["bands"][band][name]
+                    versus = stats.get("versus_model")
+                    paired = " " * 13
+                    if versus:
+                        paired = "%+5.1f (%3.0f%%)" % (
+                            versus["median_mse_reduction_pct"], versus["a_better_basins_pct"])
+                    line += "  %6.1f | %s" % (stats["median_basin_skill_pct"], paired)
+                print(line)
     elif args.command == "compare":
         runs = dict(args.run)
         if args.reference not in runs:

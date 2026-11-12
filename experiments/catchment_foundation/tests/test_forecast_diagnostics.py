@@ -53,6 +53,29 @@ class TestForecastDiagnostics(unittest.TestCase):
                          os.path.join(diagnostics.HERE, "README.md"))
         self.assertEqual(diagnostics.resolve_path(__file__), __file__)
 
+    def test_identity_corrections_recover_a_stable_basin_offset_and_nothing_else(self):
+        rng = np.random.default_rng(0)
+
+        def windows(n, offsets, noise):
+            basin = np.repeat(["a", "b"], n)
+            obs = rng.normal(size=(2 * n, 4))
+            sim = obs - np.repeat(offsets, n)[:, None] + noise * rng.normal(size=(2 * n, 4))
+            return {"sim": sim, "obs": obs, "per": np.zeros(2 * n), "basin": basin,
+                    "month": rng.integers(1, 13, size=2 * n)}
+
+        fit = windows(200, [1.0, -2.0], 0.1)       # each basin's forecasts are biased by a constant
+        later = windows(50, [1.0, -2.0], 0.1)
+        corrected = diagnostics.identity_corrections(fit, later, fit)
+
+        def mse(series):
+            return float(((series - later["obs"]) ** 2).mean())
+
+        self.assertGreater(mse(later["sim"]), 2.0)
+        self.assertLess(mse(corrected["offset"]), 0.05)            # the per-basin offset removes it
+        self.assertLess(mse(corrected["seasonal_offset"]), 0.1)
+        self.assertGreater(mse(corrected["pooled_seasonal_offset"]), 1.5)   # no identity: no help
+        self.assertEqual(corrected["offset"].shape, later["sim"].shape)
+
 
 if __name__ == "__main__":
     unittest.main()
