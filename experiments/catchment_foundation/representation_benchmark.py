@@ -253,6 +253,37 @@ def load_locations(gauges_root: str) -> pd.DataFrame:
     return table[["dec_lat_va", "dec_long_va"]].astype(float)
 
 
+def location_km(place: pd.DataFrame, sites: List[str], cohort: List[str],
+                train_sites: List[str]) -> np.ndarray:
+    """
+    Places gauges east and north of the centre of the training basins, in units of 500 km.
+
+    Both axes share one scale, so distances stay distances. The scale and the centre come from
+    the cohort alone, so gauges outside it can be placed on the cohort's own map.
+
+    :param place: Coordinates from :func:`load_locations`.
+    :type place: pd.DataFrame
+    :param sites: The gauges to place, in row order.
+    :type sites: List[str]
+    :param cohort: The basins that fix the east-west scale (their mean latitude).
+    :type cohort: List[str]
+    :param train_sites: The basins whose centre is the origin.
+    :type train_sites: List[str]
+    :return: Array of shape (n_sites, 2); a gauge without coordinates sits at the origin.
+    :rtype: np.ndarray
+    """
+    shrink = np.cos(np.nanmean(np.radians(place.dec_lat_va.reindex(cohort).to_numpy())))
+
+    def position(names: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        rows = place.reindex(names)
+        return (6371.0 * np.radians(rows.dec_long_va.to_numpy()) * shrink,
+                6371.0 * np.radians(rows.dec_lat_va.to_numpy()))
+
+    centre_east, centre_north = (np.nanmean(axis) for axis in position(train_sites))
+    east, north = position(sites)
+    return np.nan_to_num(np.stack([east - centre_east, north - centre_north], axis=1) / 500.0)
+
+
 def image_statistics(image: np.ndarray, bands: Sequence[str]) -> Dict[str, float]:
     """
     Summarizes a satellite patch as hand-built numbers.
@@ -369,14 +400,8 @@ def build(manifest_path: str, arms_dir: str, gauges_root: Optional[str], workers
         raw = early.reindex(sites)[columns].to_numpy(dtype=float)
         _write_bank(arms_dir, name, sites, standardize_context(raw, train_rows, CONTEXT_WIDTH))
     if gauges_root:
-        # One common scale for both axes, so distances stay distances.
-        place = load_locations(gauges_root).reindex(sites)
-        latitude = np.radians(place.dec_lat_va.to_numpy())
-        north = 6371.0 * latitude
-        east = 6371.0 * np.radians(place.dec_long_va.to_numpy()) * np.cos(np.nanmean(latitude))
-        km = np.stack([east - np.nanmean(east[train_rows]), north - np.nanmean(north[train_rows])],
-                      axis=1) / 500.0
-        _write_bank(arms_dir, "location", sites, np.nan_to_num(km))
+        place = load_locations(gauges_root)
+        _write_bank(arms_dir, "location", sites, location_km(place, sites, sites, train_sites))
     benchmark = {"early": early, "late": late, "regime": regime, "later_flow": later_flow,
                  "split": split, "state": state, "regime_thresholds": thresholds,
                  "manifest": os.path.abspath(manifest_path)}

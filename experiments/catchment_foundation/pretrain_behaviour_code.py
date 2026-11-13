@@ -19,7 +19,14 @@ the reach image) and is fitted on the training basins so that the frozen decoder
 their flow from its code and its code matches the gauge code of the same basin. The gauged code
 is untouched, and an ungauged basin lands in the same space.
 
+``pool`` adds basins to pretraining without touching the cohort a code is scored on. It stores
+the pre-cutoff record of further basins of a larger manifest, leaving out the cohort's own and
+every basin whose HUC6 group holds a held-out site; ``train --with-pool`` and ``align
+--with-pool`` then fit on them as well. Validation, the basins that get a code and the scale of
+the banks stay the cohort's.
+
     cache    read every basin's hourly file once and keep the pre-cutoff daily record
+    pool     store the pre-cutoff record of extra basins that may only be pretrained on
     train    pretrain on the training basins and write the banks for every basin
     align    fit the statics (and image) readers to the code of a finished gauge-only run
     shuffle  write ``context_<name>_shuffled.pt``: a bank's codes permuted within each split
@@ -41,14 +48,16 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from experiments.catchment_foundation import representation_benchmark as benchmark
 from experiments.catchment_foundation import tabular_forecast_baseline as tabular
 
 if os.environ.get("FF_REPO"):
@@ -63,6 +72,7 @@ AUX = ["log_runoff_mm", "log_runoff_ratio", "snow_fraction", "zero_flow_fraction
        "recession_rate", "storm_response", "rain_flow_coupling", "rb_flashiness", "bfi",
        "melt_share", "flood_peak", "flood_ratio", "low_flow"]
 CACHE = "daily_pre_cutoff.pkl"
+POOL = "daily_pool_pre_cutoff.pkl"    # extra basins a code may be pretrained on (never scored)
 IMAGE_SCALE = 3000.0                  # reflectance divisor, as in Flow Forecast's catchment loader
 HISTORY_CHANNELS = 7                  # log flow, valid flag and the five weather channels
 
@@ -113,6 +123,208 @@ def build_cache(manifest_path: str, arms_dir: str, workers: int) -> Dict:
     return cache
 
 
+def pool_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame, Optional[Dict]]]:
+    """
+    Reads one extra basin: its daily record and behaviour numbers, both before the cutoff.
+
+    :param basin: Manifest entry.
+    :type basin: Dict
+    :return: Site id, the daily frame of :func:`daily_record` and the behaviour numbers (None
+        when the record is too short for them), or None when the hourly file cannot be read.
+    :rtype: Tuple[str, pd.DataFrame, Optional[Dict]], optional
+    """
+    hourly = tabular.load_hourly(basin)
+    if hourly is None:
+        return None
+    daily = tabular.daily_frame(hourly, basin)
+    cutoff = pd.Timestamp(CUTOFF)
+    offset = float(basin.get("temp_offset_c") or 0.0)
+    early = benchmark.behaviour(daily[daily.index < cutoff], hourly[hourly.index < cutoff],
+                                basin["area_sq_km"], offset)
+    record = daily.loc[daily.index < cutoff, ["q_mm", "p", "t", "pet"]].copy()
+    record["t"] = record["t"] + offset
+    return str(basin["site_id"]), record.asfreq("1D").astype(np.float32), early
+
+
+def select_pool(basins: List[Dict], split_sites: Dict[str, Dict], cohort: Iterable[str],
+                exclude_folds: Iterable[int], max_negative_flow_fraction: Optional[float] = None
+                ) -> Tuple[List[Dict], Dict[str, int]]:
+    """
+    Chooses the extra basins a code may be pretrained on.
+
+    A basin is left out when the cohort already holds it, when the split does not know it, or
+    when its HUC6 group holds a site of an excluded fold in any state, so no extra basin trains
+    upstream or downstream of a held-out one. Tidal and backwater gauges can be left out by
+    their share of negative flow, as ``prepare_context_ablation.py`` does for a cohort.
+
+    :param basins: Manifest entries of the candidates.
+    :type basins: List[Dict]
+    :param split_sites: The basin split's ``sites`` (site id -> group and fold).
+    :type split_sites: Dict[str, Dict]
+    :param cohort: Site ids of the cohort the code is scored on.
+    :type cohort: Iterable[str]
+    :param exclude_folds: Folds whose groups stay untouched (the held-out folds).
+    :type exclude_folds: Iterable[int]
+    :param max_negative_flow_fraction: Largest ``negative_flow_fraction`` of a manifest entry
+        that is kept, defaults to None (no limit).
+    :type max_negative_flow_fraction: float, optional
+    :return: The chosen entries and the number of basins left out for each reason.
+    :rtype: Tuple[List[Dict], Dict[str, int]]
+    """
+    excluded = set(exclude_folds)
+    limit = np.inf if max_negative_flow_fraction is None else max_negative_flow_fraction
+    held_groups = {info["group"] for info in split_sites.values() if info["fold"] in excluded}
+    taken, chosen, dropped = set(str(site) for site in cohort), [], Counter()
+    for basin in basins:
+        site = str(basin["site_id"])
+        if site in taken:
+            dropped["already in the cohort or listed twice"] += 1
+        elif site not in split_sites:
+            dropped["not in the split"] += 1
+        elif split_sites[site]["group"] in held_groups:
+            dropped["in a held-out group"] += 1
+        elif basin.get("negative_flow_fraction", 0.0) > limit:
+            dropped["tidal or backwater"] += 1
+        else:
+            chosen.append(basin)
+            taken.add(site)
+    return chosen, dict(dropped)
+
+
+def pool_static_banks(arms_dir: str, split: Dict[str, str], pool_sites: List[str],
+                      gages2_zip: str, gauges_root: str) -> Dict[str, pd.DataFrame]:
+    """
+    Describes extra basins on the scale of the cohort's ``statics`` and ``location`` banks.
+
+    The cohort's rows are rebuilt alongside and must reproduce the banks on disk, so an extra
+    basin's numbers mean what a cohort basin's numbers mean.
+
+    :param arms_dir: Directory of the cohort's context banks.
+    :type arms_dir: str
+    :param split: Cohort site id -> split (train or holdout), in bank order.
+    :type split: Dict[str, str]
+    :param pool_sites: The extra basins.
+    :type pool_sites: List[str]
+    :param gages2_zip: Path of the GAGES-II archive.
+    :type gages2_zip: str
+    :param gauges_root: Scrape root holding ``<state>/gauges.csv``.
+    :type gauges_root: str
+    :return: Bank name -> frame indexed by site id with the columns ``tabular.load_bank``
+        returns. ``statics`` only holds the extra basins that are in GAGES-II.
+    :rtype: Dict[str, pd.DataFrame]
+    """
+    from embedding_dataset import build_static_matrix
+    from experiments.catchment_foundation.embedding_probes import STATICS_BASELINE_EXCLUDE
+    from experiments.catchment_foundation.prepare_context_ablation import standardize_context
+    cohort = list(split)
+    train_sites = [site for site in cohort if split[site] == "train"]
+    matrix, names = build_static_matrix(gages2_zip)
+    physical = [name for name in names
+                if not any(name.startswith(prefix) for prefix in STATICS_BASELINE_EXCLUDE)]
+    described = [site for site in pool_sites if site in matrix.index]
+    raw = matrix.reindex(cohort + described)[physical].to_numpy(dtype=np.float32)
+    train_rows = np.array([split[site] == "train" for site in cohort] + [False] * len(described))
+    scaled = standardize_context(raw, train_rows, benchmark.CONTEXT_WIDTH)
+    place = benchmark.load_locations(gauges_root)
+    rebuilt = {"statics": (scaled, described),
+               "location": (benchmark.location_km(place, cohort + pool_sites, cohort, train_sites),
+                            pool_sites)}
+    banks = {}
+    for name, (values, extra) in rebuilt.items():
+        stored = torch.load(os.path.join(arms_dir, "context_%s.pt" % name),
+                            weights_only=True)["embeddings"].numpy()
+        filled = np.abs(stored).sum(axis=0) > 0
+        values = values[:, :stored.shape[1]][:, filled]
+        gap = float(np.abs(values[:len(cohort)] - stored[:, filled]).max())
+        if gap > 1e-3:
+            raise ValueError("the rebuilt %s bank differs from the one on disk by up to %.3g"
+                             % (name, gap))
+        banks[name] = pd.DataFrame(values[len(cohort):], index=extra, dtype=np.float32)
+    return banks
+
+
+def build_pool(manifest_path: str, split_path: str, arms_dir: str,
+               exclude_folds: Sequence[int] = (0,), workers: int = 6,
+               gages2_zip: Optional[str] = None, gauges_root: Optional[str] = None,
+               max_negative_flow_fraction: Optional[float] = None) -> Dict:
+    """
+    Stores the extra basins a code may be pretrained on, next to a cohort's daily cache.
+
+    The cohort and its split are untouched: codes are still written and scored for the
+    cohort's basins only. The pool adds basins to the fitting set and nothing else.
+
+    :param manifest_path: Manifest of the candidate basins (any set that includes the extras).
+    :type manifest_path: str
+    :param split_path: Basin split that knows the candidates (site id -> group and fold).
+    :type split_path: str
+    :param arms_dir: Directory holding the cohort's daily cache; the pool is written here.
+    :type arms_dir: str
+    :param exclude_folds: Folds whose HUC6 groups are kept out of the pool, defaults to (0,).
+    :type exclude_folds: Sequence[int], optional
+    :param workers: Processes reading hourly files.
+    :type workers: int
+    :param gages2_zip: GAGES-II archive; with ``gauges_root``, the pool also carries the
+        ``statics`` and ``location`` descriptions of its basins. Defaults to None.
+    :type gages2_zip: str, optional
+    :param gauges_root: Scrape root holding ``<state>/gauges.csv``, defaults to None.
+    :type gauges_root: str, optional
+    :param max_negative_flow_fraction: Leave out basins with a larger share of negative flow,
+        defaults to None. Use the limit the cohort was built with.
+    :type max_negative_flow_fraction: float, optional
+    :return: The pool (``daily``, ``early``, ``banks``, ``state``, ``fold`` and its sources).
+    :rtype: Dict
+    """
+    split = pd.read_pickle(os.path.join(arms_dir, CACHE))["split"]
+    with open(manifest_path) as file:
+        basins = json.load(file)["basins"]
+    with open(split_path) as file:
+        split_sites = json.load(file)["sites"]
+    chosen, dropped = select_pool(basins, split_sites, split, exclude_folds,
+                                  max_negative_flow_fraction)
+    started = time.time()
+    with ProcessPoolExecutor(max_workers=workers) as readers:
+        records = [item for item in readers.map(pool_record, chosen, chunksize=4) if item]
+    daily = {site: frame for site, frame, _ in records}
+    early = pd.DataFrame({site: numbers for site, _, numbers in records if numbers}).T
+    banks = None
+    if gages2_zip and gauges_root:
+        banks = pool_static_banks(arms_dir, split, sorted(daily), gages2_zip, gauges_root)
+    pool = {"daily": daily, "early": early, "banks": banks,
+            "state": {str(basin["site_id"]): basin.get("state", "") for basin in chosen},
+            "fold": {site: split_sites[site]["fold"] for site in daily},
+            "manifest": os.path.abspath(manifest_path), "split": os.path.abspath(split_path),
+            "exclude_folds": sorted(exclude_folds), "dropped": dropped,
+            "max_negative_flow_fraction": max_negative_flow_fraction}
+    pd.to_pickle(pool, os.path.join(arms_dir, POOL))
+    usable = sum(len(water_years(frame)) >= 2 for frame in daily.values())
+    print("pool: %d extra basins read in %.0f s (%d with two usable water years, %d with "
+          "behaviour numbers, %s with statics); left out: %s"
+          % (len(daily), time.time() - started, usable, len(early),
+             "none" if banks is None else len(banks["statics"]), dropped), flush=True)
+    return pool
+
+
+def pool_members(pool: Optional[Dict], split: Dict[str, str],
+                 statics: Optional[pd.DataFrame]) -> List[str]:
+    """
+    Lists the pool's basins a run can fit on.
+
+    :param pool: The pool of :func:`build_pool`, or None.
+    :type pool: Dict, optional
+    :param split: The cohort's split; its basins are never taken from the pool.
+    :type split: Dict[str, str]
+    :param statics: The static description the run reads, or None; a pool basin without one
+        is left out, so a statics reader never fits on a blank description.
+    :type statics: pd.DataFrame, optional
+    :return: Site ids, sorted.
+    :rtype: List[str]
+    """
+    if pool is None:
+        return []
+    return sorted(site for site in pool["daily"]
+                  if site not in split and (statics is None or site in statics.index))
+
+
 def water_years(daily: pd.DataFrame) -> List[pd.Timestamp]:
     """
     Lists the 1 October starts of the water years a basin can be trained or read on.
@@ -159,8 +371,8 @@ def flow_channel(block: pd.DataFrame) -> np.ndarray:
     return np.log(block.q_mm.to_numpy() + FLOW_FLOOR_MM).astype(np.float32)
 
 
-def load_static_banks(arms_dir: str, groups: Sequence[str], train_sites: List[str]
-                      ) -> pd.DataFrame:
+def load_static_banks(arms_dir: str, groups: Sequence[str], train_sites: List[str],
+                      extra: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
     """
     Loads the static description the statics reader sees, from the banks the baselines use.
 
@@ -171,11 +383,21 @@ def load_static_banks(arms_dir: str, groups: Sequence[str], train_sites: List[st
     :type groups: Sequence[str]
     :param train_sites: The training basins.
     :type train_sites: List[str]
+    :param extra: Bank name -> rows of further basins on the same scale (a pool's ``banks``),
+        defaults to None. A basin missing from any of the groups is left out.
+    :type extra: Dict[str, pd.DataFrame], optional
     :return: One row per basin; columns that do not vary over the training basins are dropped.
     :rtype: pd.DataFrame
     """
-    frame = pd.concat([tabular.basin_block(group, arms_dir, train_sites) for group in groups],
-                      axis=1, join="inner")
+    blocks = []
+    for group in groups:
+        block = tabular.basin_block(group, arms_dir, train_sites)
+        if extra is not None:
+            if group not in extra:
+                raise ValueError("the pool has no %s description" % group)
+            block = pd.concat([block, extra[group].loc[~extra[group].index.isin(block.index)]])
+        blocks.append(block)
+    frame = pd.concat(blocks, axis=1, join="inner")
     frame.columns = range(frame.shape[1])
     varying = frame.loc[frame.index.intersection(train_sites)].std() > 0
     return frame.loc[:, varying.to_numpy()].astype(np.float32)
@@ -523,11 +745,16 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
           weight_decay: float = 1e-4, aux_weight: float = 0.0, validation_fraction: float = 0.15,
           read_passes: int = 6, device: str = "cpu", static_banks: Sequence[str] = (),
           image_records: Optional[str] = None, modality_dropout: float = 0.3,
-          patch_size: int = 16, cache: Optional[Dict] = None,
+          patch_size: int = 16, with_pool: bool = False, cache: Optional[Dict] = None,
           early: Optional[pd.DataFrame] = None, statics: Optional[pd.DataFrame] = None,
-          images: Optional[Dict[str, np.ndarray]] = None, verbose: bool = True) -> Dict:
+          images: Optional[Dict[str, np.ndarray]] = None, pool: Optional[Dict] = None,
+          verbose: bool = True) -> Dict:
     """
     Pretrains the code on the training basins and writes its banks for all basins.
+
+    With a pool (:func:`build_pool`), its basins are added to the fitting basins and to nothing
+    else: the validation basins, the basins that get a code and the scale of the banks are the
+    cohort's, so a run with a pool is scored exactly like a run without one.
 
     :param arms_dir: Directory holding the daily cache and ``benchmark.pkl``; outputs go here.
     :type arms_dir: str
@@ -553,6 +780,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     :param modality_dropout: Chance that a reader is switched off for a training item (at least
         one reader always stays on); only used with several readers.
     :type modality_dropout: float
+    :param with_pool: Read the pool stored in ``arms_dir``, defaults to False.
+    :type with_pool: bool, optional
     :param cache: The daily cache, defaults to None (read from ``arms_dir``).
     :type cache: Dict, optional
     :param early: Pre-cutoff behaviour numbers, defaults to None (read from ``benchmark.pkl``).
@@ -561,6 +790,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     :type statics: pd.DataFrame, optional
     :param images: Site id -> standardized image, defaults to None (``image_records``).
     :type images: Dict[str, np.ndarray], optional
+    :param pool: Extra fitting basins, defaults to None (``with_pool``).
+    :type pool: Dict, optional
     :return: The run summary, also written to ``reports/pretrain_<name>.json``.
     :rtype: Dict
     """
@@ -570,17 +801,25 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     sites = list(split)
     train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
     torch.manual_seed(seed)
+    if pool is None and with_pool:
+        pool = pd.read_pickle(os.path.join(arms_dir, POOL))
 
+    if statics is None and static_banks:
+        statics = load_static_banks(arms_dir, static_banks, train_sites,
+                                    extra=pool["banks"] if pool else None)
+    extras = pool_members(pool, split, statics)
+    if pool is not None:
+        daily = {**pool["daily"], **daily}
     aux, aux_head = None, None
     if aux_weight > 0:
         if early is None:
             early = pd.read_pickle(os.path.join(arms_dir, "benchmark.pkl"))["early"]
-        aux = standardized_aux(early, fit_sites).reindex(sites)
+        if pool is not None:
+            early = pd.concat([early, pool["early"].loc[~pool["early"].index.isin(early.index)]])
+        aux = standardized_aux(early, fit_sites + extras).reindex(sites + extras)
         aux_head = torch.nn.Linear(code_dim, len(AUX))
-    if statics is None and static_banks:
-        statics = load_static_banks(arms_dir, static_banks, train_sites)
     if statics is not None:
-        statics = statics.reindex(sites).fillna(0.0).astype(np.float32)
+        statics = statics.reindex(sites + extras).fillna(0.0).astype(np.float32)
     if images is None and image_records:
         with open(cache["manifest"]) as file:
             states = {str(basin["site_id"]): str(basin.get("state", ""))
@@ -588,14 +827,14 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
         images = load_images(image_records, states, fit_sites)
     if images is not None:
         blank = np.zeros_like(next(iter(images.values())))       # the band means
-        images = {site: images.get(site, blank) for site in sites}
+        images = {site: images.get(site, blank) for site in sites + extras}
     lasting = {"statics": statics, "images": images}
     readers = ["history"] + [reader for reader, given in (("statics", statics), ("image", images))
                              if given is not None]
     subsets = reader_subsets(readers)
 
-    fit = WaterYearDataset(daily, fit_sites, n_read=n_read, draws=draws, seed=seed, aux=aux,
-                           augment=True, **lasting)
+    fit = WaterYearDataset(daily, fit_sites + extras, n_read=n_read, draws=draws, seed=seed,
+                           aux=aux, augment=True, **lasting)
     validation = None
     if validation_sites:
         validation = WaterYearDataset(daily, validation_sites, n_read=n_read, draws=4, seed=seed,
@@ -635,6 +874,7 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
                "static_width": 0 if statics is None else int(statics.shape[1]),
                "modality_dropout": modality_dropout if len(readers) > 1 else 0.0,
                "fit_basins": len(fit.site_ids),
+               "pool_basins": len(set(fit.site_ids) & set(extras)),
                "validation_basins": len(validation.site_ids) if validation else 0,
                "validation_fraction": validation_fraction,
                "basins_with_code": basins_with_code, "minutes": round(minutes, 2),
@@ -667,9 +907,10 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
           validation_fraction: float = 0.15, read_passes: int = 6, device: str = "cpu",
           static_banks: Sequence[str] = ("statics", "location"),
           image_records: Optional[str] = None, modality_dropout: float = 0.3,
-          patch_size: int = 16, cache: Optional[Dict] = None,
+          patch_size: int = 16, with_pool: bool = False, cache: Optional[Dict] = None,
           statics: Optional[pd.DataFrame] = None,
-          images: Optional[Dict[str, np.ndarray]] = None, verbose: bool = True) -> Dict:
+          images: Optional[Dict[str, np.ndarray]] = None, pool: Optional[Dict] = None,
+          verbose: bool = True) -> Dict:
     """
     Fits the readers of an ungauged basin to the code of a finished gauge-only run.
 
@@ -681,6 +922,10 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     the new readers; ``context_<name>_transfer.pt`` holds the gauge code for training basins
     and the new code for held-out basins, which is what a model fitted on gauged basins sees
     when it is applied to ungauged ones.
+
+    With a pool (:func:`build_pool`), its basins that have a static description are added to
+    the fitting basins, each with the gauge code the teacher reads from its record; validation,
+    the banks and their scale stay the cohort's.
 
     :param arms_dir: Directory holding the daily cache, the banks and the teacher's files.
     :type arms_dir: str
@@ -697,6 +942,10 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     :type static_banks: Sequence[str]
     :param image_records: Root of the embedding records for an image reader, defaults to None.
     :type image_records: str, optional
+    :param with_pool: Read the pool stored in ``arms_dir``, defaults to False.
+    :type with_pool: bool, optional
+    :param pool: Extra fitting basins, defaults to None (``with_pool``).
+    :type pool: Dict, optional
     :return: The run summary, also written to ``reports/pretrain_<name>.json``.
     :rtype: Dict
     """
@@ -710,6 +959,15 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     sites, seed, code_dim = list(split), taught["seed"], taught["code_dim"]
     train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
     torch.manual_seed(seed)
+    if pool is None and with_pool:
+        pool = pd.read_pickle(os.path.join(arms_dir, POOL))
+    if statics is None and static_banks:
+        statics = load_static_banks(arms_dir, static_banks, train_sites,
+                                    extra=pool["banks"] if pool else None)
+    # Only a pool basin with a static description can teach the statics reader.
+    extras = pool_members(pool, split, statics) if statics is not None else []
+    if pool is not None:
+        daily = {**pool["daily"], **daily}
 
     gauge_reader, decoder = build_models(code_dim, taught["dim"], taught["depth"],
                                          taught["hidden"], taught["dropout"])
@@ -717,7 +975,7 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     gauge_reader.load_state_dict(state["encoder"]), decoder.load_state_dict(state["decoder"])
     for parameter in decoder.parameters():
         parameter.requires_grad_(False)
-    gauge_codes = write_codes(gauge_reader, daily, sites, taught["n_read"], read_passes,
+    gauge_codes = write_codes(gauge_reader, daily, sites + extras, taught["n_read"], read_passes,
                               batch_size, device)
     fitted = gauge_codes.loc[gauge_codes.index.intersection(train_sites)]
     mean, spread = fitted.mean(), fitted.std().replace(0.0, 1.0)
@@ -729,12 +987,10 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
         to_bank_scale.bias.copy_(torch.tensor((-mean / spread).to_numpy(), dtype=torch.float32))
     for parameter in to_bank_scale.parameters():
         parameter.requires_grad_(False)
-    targets = ((gauge_codes - mean) / spread).reindex(sites)
+    targets = ((gauge_codes - mean) / spread).reindex(sites + extras)
 
-    if statics is None and static_banks:
-        statics = load_static_banks(arms_dir, static_banks, train_sites)
     if statics is not None:
-        statics = statics.reindex(sites).fillna(0.0).astype(np.float32)
+        statics = statics.reindex(sites + extras).fillna(0.0).astype(np.float32)
     if images is None and image_records:
         with open(cache["manifest"]) as file:
             states = {str(basin["site_id"]): str(basin.get("state", ""))
@@ -742,7 +998,7 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
         images = load_images(image_records, states, fit_sites)
     if images is not None:
         blank = np.zeros_like(next(iter(images.values())))
-        images = {site: images.get(site, blank) for site in sites}
+        images = {site: images.get(site, blank) for site in sites + extras}
     lasting = {"statics": statics, "images": images}
     student, _ = build_models(code_dim, dim, depth, taught["hidden"], dropout,
                               n_statics=0 if statics is None else statics.shape[1],
@@ -750,8 +1006,8 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
                               patch_size=patch_size, gauged=False)
     if not student.encoders:
         raise ValueError("give static banks or image records for the new readers")
-    fit = WaterYearDataset(daily, fit_sites, n_read=1, draws=draws, seed=seed, aux=targets,
-                           augment=True, **lasting)
+    fit = WaterYearDataset(daily, fit_sites + extras, n_read=1, draws=draws, seed=seed,
+                           aux=targets, augment=True, **lasting)
     validation = WaterYearDataset(daily, validation_sites, n_read=1, draws=4, seed=seed,
                                   fixed=True, aux=targets, **lasting)
     started = time.time()
@@ -784,6 +1040,7 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
                "code_weight": code_weight, "readers": list(student.encoders),
                "banks": [name, name + "_transfer"], "static_banks": list(static_banks),
                "image_records": image_records, "fit_basins": len(fit.site_ids),
+               "pool_basins": len(set(fit.site_ids) & set(extras)),
                "validation_basins": len(validation.site_ids), "minutes": round(minutes, 2),
                "best_epoch": history["best_epoch"][0], "decoder_unchanged": unchanged,
                "validation": {"gauge code": gauged["all"], "new code": ungauged["all"],
@@ -831,6 +1088,18 @@ def main() -> None:
     cacher.add_argument("--arms-dir", required=True)
     cacher.add_argument("--manifest", default=None, help="defaults to <arms dir>/manifest_none.json")
     cacher.add_argument("--workers", type=int, default=6)
+    pooler = commands.add_parser("pool", help="store extra basins a code may be pretrained on")
+    pooler.add_argument("--arms-dir", required=True)
+    pooler.add_argument("--manifest", required=True, help="manifest holding the extra basins")
+    pooler.add_argument("--split", required=True, help="basin split that knows those basins")
+    pooler.add_argument("--exclude-folds", type=int, nargs="+", default=[0],
+                        help="folds whose HUC6 groups stay out of the pool")
+    pooler.add_argument("--gages2-zip", default=None,
+                        help="GAGES-II archive, to describe the extra basins for a statics reader")
+    pooler.add_argument("--gauges-root", default=None, help="scrape root with <state>/gauges.csv")
+    pooler.add_argument("--max-negative-flow-fraction", type=float, default=None,
+                        help="leave out tidal and backwater gauges, as the cohort does")
+    pooler.add_argument("--workers", type=int, default=6)
     trainer = commands.add_parser("train", help="pretrain the code and write its bank")
     trainer.add_argument("--arms-dir", required=True)
     trainer.add_argument("--name", required=True)
@@ -857,6 +1126,8 @@ def main() -> None:
                               "reader")
     trainer.add_argument("--modality-dropout", type=float, default=0.3)
     trainer.add_argument("--patch-size", type=int, default=16)
+    trainer.add_argument("--with-pool", action="store_true",
+                         help="also fit on the extra basins stored by the pool command")
     aligner = commands.add_parser("align", help="fit statics (and image) readers to the code "
                                                 "of a gauge-only run")
     aligner.add_argument("--arms-dir", required=True)
@@ -877,6 +1148,8 @@ def main() -> None:
     aligner.add_argument("--image-records", default=None)
     aligner.add_argument("--modality-dropout", type=float, default=0.3)
     aligner.add_argument("--patch-size", type=int, default=16)
+    aligner.add_argument("--with-pool", action="store_true",
+                         help="also fit on the pool's basins that have a static description")
     shuffler = commands.add_parser("shuffle", help="write a bank permuted within each split")
     shuffler.add_argument("--arms-dir", required=True)
     shuffler.add_argument("--name", required=True)
@@ -885,6 +1158,10 @@ def main() -> None:
     if args.command == "cache":
         manifest = args.manifest or os.path.join(args.arms_dir, "manifest_none.json")
         build_cache(manifest, args.arms_dir, args.workers)
+        return
+    if args.command == "pool":
+        build_pool(args.manifest, args.split, args.arms_dir, args.exclude_folds, args.workers,
+                   args.gages2_zip, args.gauges_root, args.max_negative_flow_fraction)
         return
     if args.command == "shuffle":
         print("wrote context_%s.pt" % shuffle_bank(args.arms_dir, args.name, args.seed))

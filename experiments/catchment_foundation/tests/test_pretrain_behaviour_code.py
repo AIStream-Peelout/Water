@@ -318,5 +318,92 @@ class TestTrain(unittest.TestCase):
         self.assertLess(checks["new code"], checks["mean code"])
 
 
+class TestPool(unittest.TestCase):
+    """Extra basins are pretrained on and nothing else: no code, no validation, no scale."""
+
+    SPLIT = {"a": {"group": "140100", "fold": 0, "state": "CO"},
+             "b": {"group": "140200", "fold": 2, "state": "CO"},
+             "c": {"group": "140100", "fold": 3, "state": "UT"},   # shares a group with a
+             "d": {"group": "140300", "fold": 1, "state": "UT"},
+             "e": {"group": "140200", "fold": 2, "state": "CO"},
+             "f": {"group": "140400", "fold": 4, "state": "UT"}}
+
+    def test_selection_leaves_out_the_cohort_and_held_out_groups(self):
+        basins = [{"site_id": site} for site in ("a", "b", "c", "d", "e", "e", "x", "f")]
+        chosen, dropped = pretrain.select_pool(basins, self.SPLIT, cohort=["b"], exclude_folds=[0])
+        self.assertEqual([basin["site_id"] for basin in chosen], ["d", "e", "f"])
+        self.assertEqual(dropped, {"in a held-out group": 2, "not in the split": 1,
+                                   "already in the cohort or listed twice": 2})
+        chosen, _ = pretrain.select_pool(basins, self.SPLIT, cohort=["b"], exclude_folds=[0, 1])
+        self.assertEqual([basin["site_id"] for basin in chosen], ["e", "f"])
+        tidal = [{"site_id": "d", "negative_flow_fraction": 0.2}, {"site_id": "f"},
+                 {"site_id": "e", "negative_flow_fraction": 0.005}]
+        chosen, dropped = pretrain.select_pool(tidal, self.SPLIT, cohort=[], exclude_folds=[0],
+                                               max_negative_flow_fraction=0.01)
+        self.assertEqual([basin["site_id"] for basin in chosen], ["f", "e"])
+        self.assertEqual(dropped, {"tidal or backwater": 1})
+
+    def test_members_need_a_static_description_when_statics_are_read(self):
+        pool = {"daily": {"p1": None, "p2": None, "s1": None}}
+        statics = pd.DataFrame({0: [0.0, 1.0]}, index=["s1", "p2"])
+        split = {"s1": "train"}
+        self.assertEqual(pretrain.pool_members(None, split, None), [])
+        self.assertEqual(pretrain.pool_members(pool, split, None), ["p1", "p2"])
+        self.assertEqual(pretrain.pool_members(pool, split, statics), ["p2"])
+
+    def test_static_banks_take_extra_rows_on_the_same_columns(self):
+        sites = ["s0", "s1", "s2", "s3"]
+        with tempfile.TemporaryDirectory() as tmp:
+            write_bank(tmp, "statics", sites, np.array([[1.0, 5.0, 0.0], [2.0, 5.0, 0.0],
+                                                        [3.0, 5.0, 0.0], [4.0, 5.0, 0.0]]))
+            write_bank(tmp, "location", sites, np.array([[0.1], [0.2], [0.3], [0.4]]))
+            extra = {"statics": pd.DataFrame([[9.0, 5.0], [8.0, 5.0]], index=["p1", "p2"]),
+                     "location": pd.DataFrame([[0.9]], index=["p1"])}
+            frame = pretrain.load_static_banks(tmp, ["statics", "location"], sites[:3],
+                                               extra=extra)
+            with self.assertRaises(ValueError):
+                pretrain.load_static_banks(tmp, ["statics", "location"], sites[:3],
+                                           extra={"statics": extra["statics"]})
+        # p2 has no location and is left out; the column that is constant in training is dropped.
+        self.assertEqual(list(frame.index), sites + ["p1"])
+        np.testing.assert_allclose(frame.loc["p1"].to_numpy(), [9.0, 0.9], rtol=1e-6)
+
+    @unittest.skipUnless(HAVE_FF, "Flow Forecast behaviour_pretrain is not importable")
+    def test_pool_basins_are_fitted_on_but_get_no_code(self):
+        rng = np.random.default_rng(4)
+        gains = np.exp(rng.uniform(np.log(0.05), np.log(2.0), 32))
+        daily = {"s%02d" % index: synthetic_daily(gain, index, start="2015-01-01")
+                 for index, gain in enumerate(gains)}
+        sites = list(daily)
+        cohort, extra = sites[:20], sites[20:]
+        split = {site: "holdout" if index >= 15 else "train" for index, site in enumerate(cohort)}
+        cache = {"daily": {site: daily[site] for site in cohort}, "split": split}
+        early = pd.DataFrame({name: np.log(gains) for name in pretrain.AUX}, index=sites)
+        wetness = pd.DataFrame({0: np.log(gains), 1: rng.normal(size=32)}, index=sites)
+        pool = {"daily": {site: daily[site] for site in extra + cohort[:2]},   # two overlap
+                "early": early.loc[extra], "banks": None}
+        described = wetness.drop(index=extra[:4])            # four pool basins have no statics
+        with tempfile.TemporaryDirectory() as tmp:
+            options = dict(seed=5, epochs=3, code_dim=4, dim=16, depth=1, hidden=16, dropout=0.0,
+                           n_read=2, draws=2, batch_size=16, lr=3e-3, validation_fraction=0.2,
+                           read_passes=2, cache=cache, verbose=False)
+            alone = pretrain.train(tmp, "alone", aux_weight=0.5, early=early.loc[cohort],
+                                   **options)
+            pooled = pretrain.train(tmp, "pooled", aux_weight=0.5, early=early.loc[cohort],
+                                    pool=pool, **options)
+            student = pretrain.align(tmp, "student", "pooled", epochs=3, dim=16, depth=1,
+                                     dropout=0.0, draws=2, batch_size=16, lr=3e-3,
+                                     validation_fraction=0.2, read_passes=2, cache=cache,
+                                     statics=described, static_banks=(), pool=pool, verbose=False)
+            banks = {name: tabular.load_bank(tmp, name)
+                     for name in ("pooled", "student", "student_transfer")}
+        self.assertEqual((alone["fit_basins"], alone["pool_basins"]), (12, 0))
+        self.assertEqual((pooled["fit_basins"], pooled["pool_basins"]), (24, 12))
+        self.assertEqual(pooled["validation_basins"], alone["validation_basins"])
+        self.assertEqual((student["fit_basins"], student["pool_basins"]), (20, 8))
+        for bank in banks.values():                          # codes for the cohort only
+            self.assertEqual(sorted(bank.index), sorted(cohort))
+
+
 if __name__ == "__main__":
     unittest.main()
