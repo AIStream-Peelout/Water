@@ -45,6 +45,17 @@ statics + signatures.
 **Ungauged student.** Statics + imagery are aligned to the pretrained code, as image and text
 towers are aligned in CLIP. Its bar is physical statics alone.
 
+**One code, several readers (multimodal).** The embedding is one space, and each kind of data
+about a basin has its own reader that writes into it: the gauged record (water years of flow
+and weather), the physical statics, and the imagery (reach and regional patches). The readers
+are fused as in Flow Forecast's `MultiModalEncoder`. In training, readers are switched off at
+random per basin (modality dropout) and the decoder must still reproduce the flow from what is
+left. A gauged basin uses every reader; an ungauged basin uses statics and imagery and lands in
+the same space, so the ungauged student is the same encoder with the gauge reader off, not a
+second model. The gauge reader is trained first because it defines what the code means; the
+statics and imagery readers are then added to it. Imagery earns its place only if the code
+without the gauge reader beats statics and location (rule 3).
+
 **Where the analogy is weak.** Word and image embeddings generalize because they see millions
 of distinct items. Here the items are basins and there are 403. Hours of record are plentiful;
 distinct basins are not. Context began to transfer only between 85 and 403 basins, so adding
