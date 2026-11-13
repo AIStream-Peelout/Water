@@ -278,3 +278,91 @@ about imagery, and nothing on fold 1.
 Next, in order: (a) add the statics and imagery readers with modality dropout and score the
 code with the gauge reader off against statics and location (rule 3); (b) align the code to
 forecasting (rule 2); (c) more basins.
+
+## 9. Step 2, second result: statics and reach-image readers added, trained together (2026-11-13)
+
+**What was built.** Flow Forecast (`behaviour-pretraining`, commit `5d3518b7`, local):
+`MultiModalEncoder.encode` and `extract_embeddings` take `modalities=[...]` and zero the other
+readers exactly as the training dropout does; `pretrain_behaviour` takes `validation_subsets`
+and picks the restored epoch on their mean. Water's `pretrain_behaviour_code.py` gained two
+readers next to the gauged record: the static description (the `statics` and `location` banks
+the baselines read, 104 numbers) and the reach image (four 10 m bands, 128 × 128 pixels at the
+gauge, patches of 16, turned and mirrored at random in training). Readers are switched off with
+probability 0.3 per training item and the epoch is chosen on the mean of the gauged and the
+ungauged validation loss. One run writes five banks: all readers, the gauged record alone,
+ungauged (statics + image), statics alone, image alone. Other settings as in §8 with side
+targets. 13 minutes per seed on CPU, 1.2 GB. Both scoring tools gained `--also-pair`, which
+compares every arm with further arms basin by basin.
+
+**Scores.** 123 held-out basins, targets from 2022 on, mean of three seeds. Forecast is the
+error cut against flow + weather + snow on 2023 onward, day 1–3 / 4–7 / 8–14.
+
+| Description | Forecast error cut | Flood size | Flood ÷ mean flow | Storm response | Low flow | Regime | Similar behaviour | Donor flow |
+|---|---|---|---|---|---|---|---|---|
+| Physical statics (102) | +2.6 / +3.0 / +3.9% | 0.62 | 0.53 | 0.67 | 0.34 | 0.46 | 0.33 | 0.30 |
+| Location (2) | +3.6 / +3.4 / +4.1% | 0.36 | 0.18 | 0.50 | 0.09 | 0.40 | 0.31 | 0.24 |
+| Statics + location (104) | +3.6 / +4.1 / +5.0% | 0.65 | 0.49 | 0.64 | 0.34 | 0.47 | 0.33 | 0.28 |
+| Gauge-only code of §8 (32) | +5.3 / +6.5 / +8.4% | 0.74 | 0.69 | 0.82 | 0.87 | 0.65 | 0.62 | 0.43 |
+| Three readers, all on | +3.5 / +4.4 / +6.4% | 0.72 | 0.61 | 0.78 | 0.78 | 0.64 | 0.56 | 0.42 |
+| Three readers, gauged record only | +3.1 / +3.5 / +6.0% | 0.72 | 0.57 | 0.81 | 0.87 | 0.65 | 0.60 | 0.43 |
+| Three readers, ungauged (statics + image) | +1.6 / +3.4 / +4.7% | 0.58 | 0.52 | 0.56 | 0.18 | 0.44 | 0.34 | 0.26 |
+| Three readers, statics only | +1.3 / +3.0 / +4.7% | 0.58 | 0.55 | 0.52 | 0.15 | 0.47 | 0.37 | 0.29 |
+| Three readers, image only | −2.3 / −0.8 / +0.4% | 0.26 | −0.33 | 0.33 | −0.09 | 0.34 | 0.01 | 0.08 |
+| Ungauged code handed to other basins | −2.4 / −2.1 / −3.6% | | | | | | | |
+
+Decoder error on the 60 validation basins (mean squared error of log flow; training-fold
+basins the run did not fit on). The first row was computed afterwards from the saved models
+with every basin given the mean code; it is not in the run reports.
+
+| Code written from | Seed 0 | Seed 1 | Seed 2 |
+|---|---|---|---|
+| Nothing (mean code) | 1.74 | 1.24 | 1.30 |
+| Image | 1.64 | 1.29 | 1.21 |
+| Statics | 1.15 | 0.91 | 0.85 |
+| Statics + image | 1.18 | 0.87 | 0.88 |
+| Gauged record | 0.62 | 0.56 | 0.49 |
+| All three | 0.66 | 0.58 | 0.55 |
+| Gauge-only run of §8, for reference | 0.51 | 0.51 | 0.43 |
+
+Readings:
+
+1. **Rule 3 is not met: the ungauged code ties raw statics and location, it does not beat
+   them.** Paired basin by basin in the forecaster it is −0.2 / −0.2 / −0.2 points against
+   statics, −1.5 / 0.0 / +1.3 against location and −1.6 / −0.8 / −0.5 against statics +
+   location. Of those 27 band-seed intervals two exclude zero: one above (location, day
+   8–14) and one below (statics + location, day 1–3). On the suite it is level with statics on five tasks and lower
+   on storm response (0.56 against 0.67, interval below zero in two seeds) and low flow (0.18
+   against 0.34, one seed). The code does describe the basin: handed to other basins of the
+   same split it costs the forecaster 2 to 4 points instead of giving 2 to 5, and it removes
+   about 30% of the validation error of the mean code. It just holds no more than its inputs.
+2. **That is what the setup allows.** The ungauged code is a function of the statics, fitted
+   on 343 basins, and is then read by a model fitted on 403. Nothing new enters, and 32
+   numbers keep less than 104 for a readout that can use the 104 directly. An ungauged code
+   can only win through inputs that add information, or by being trained on far more basins
+   than the downstream model has.
+3. **The reach image adds nothing here.** The image-only code sits at the mean-code level on
+   the validation basins, is no better than a shuffled code in the forecaster, and adding the
+   image reader to the statics reader changes nothing. Hand-built numbers from the same
+   patches (band means and spreads, NDVI, NDWI, and for the regional patch NDMI, NDSI and the
+   snow share; `representation_benchmark.py imagery`) show how much is there to find. Alone
+   they reach 0.30 / 0.03 / 0.39 / 0.21 on the extremes (reach) and −0.1 / +1.8 / +2.1% in the
+   forecaster (reach + regional), so the patches are not empty and the image reader, trained
+   from scratch on 343 basins, extracts less than 13 band statistics do. Added to statics
+   + location they move flood size by +0.02 and storm response by +0.05 (interval above zero
+   in all three seeds), nothing else on the suite, and the forecaster by −0.7 / 0.0 / 0.0
+   points. Even read perfectly, a patch centred on the gauge says little that the statics do
+   not. A longer GPU run on the regional patches is not justified by this.
+4. **Training the readers together cost the gauged path about 2 points of forecast gain**
+   (+3.5 / +4.4 / +6.4% against +5.3 / +6.5 / +8.4% for the gauge-only code; paired −1.7 /
+   −2.0 / −1.8). Two causes are visible. The ungauged validation loss bottoms early (epochs
+   22, 42, 39) while the gauged one keeps falling (29, 53, 58), so one restored epoch (22, 58,
+   39) undertrains the gauge reader; seed 0, restored at 22, gives +0.3 / +4.6 / +3.8%. And
+   with all readers on the validation error is higher than with the gauged record alone in
+   every seed: on a gauged basin the other two readers add noise. This run did not follow the
+   order set in §3 (gauge reader first, the others added to it). The next version does.
+5. **Statics + location is the ungauged bar in the forecaster** (+3.6 / +4.1 / +5.0%),
+   slightly above either alone.
+
+What this does not show: nothing on fold 1; no test of catchment-wide inputs (the patches are
+centred on the gauge, and the statics hold no land cover, dams or withdrawals); no test of the
+weather record of an ungauged basin as a reader.
