@@ -13,8 +13,15 @@ training, so the code can be written from any of them: besides ``context_<name>.
 readers) the run writes ``context_<name>_ungauged.pt`` (no gauged record), ``_gauge``,
 ``_statics`` and ``_image``.
 
+``align`` is the second stage of §3 of the plan. The gauge reader and the decoder of a finished
+``train`` run stay as they are; a second encoder reads the static description (and optionally
+the reach image) and is fitted on the training basins so that the frozen decoder reproduces
+their flow from its code and its code matches the gauge code of the same basin. The gauged code
+is untouched, and an ungauged basin lands in the same space.
+
     cache    read every basin's hourly file once and keep the pre-cutoff daily record
     train    pretrain on the training basins and write the banks for every basin
+    align    fit the statics (and image) readers to the code of a finished gauge-only run
     shuffle  write ``context_<name>_shuffled.pt``: a bank's codes permuted within each split
 
     python -m experiments.catchment_foundation.pretrain_behaviour_code cache --arms-dir <arms dir>
@@ -23,6 +30,8 @@ readers) the run writes ``context_<name>_ungauged.pt`` (no gauged record), ``_ga
     python -m experiments.catchment_foundation.pretrain_behaviour_code train \
         --arms-dir <arms dir> --name multimodal_s0 --seed 0 --aux-weight 1.0 \
         --static-banks statics location --image-records pilot_data/embedding_dataset
+    python -m experiments.catchment_foundation.pretrain_behaviour_code align \
+        --arms-dir <arms dir> --name student_s0 --teacher behaviour_aux_s0
 
 Score the banks with ``representation_benchmark.py run`` and ``tabular_forecast_baseline.py``.
 Flow Forecast is imported from ``FF_REPO`` or ``PYTHONPATH`` (branch ``behaviour-pretraining``).
@@ -382,7 +391,7 @@ def write_codes(encoder, daily: Dict[str, pd.DataFrame], sites: List[str], n_rea
     :rtype: pd.DataFrame
     """
     from flood_forecast.meta_models.contrastive_train import extract_embeddings
-    read_history = readers is None or "history" in readers
+    read_history = "history" in encoder.encoders and (readers is None or "history" in readers)
     reader = ReadYearsDataset(daily, sites, n_read=n_read, statics=statics, images=images,
                               read_history=read_history)
     options = {} if readers is None else {"modalities": list(readers)}
@@ -408,19 +417,28 @@ def validation_losses(encoder, decoder, dataset: Dataset, subsets: Dict[str, Tup
     :type dataset: Dataset
     :param subsets: Label -> readers (see :func:`reader_subsets`).
     :type subsets: Dict[str, Tuple[str, ...]]
-    :return: Label -> mean squared error of the decoded log flow.
+    :return: Label -> mean squared error of the decoded log flow (``all`` for the empty
+        label), plus ``mean code``: every basin given the batch mean of its code from all
+        readers, the level of a code that says nothing about the basin.
     :rtype: Dict[str, float]
     """
-    from flood_forecast.meta_models.behaviour_pretrain import behaviour_step
+    from flood_forecast.meta_models.behaviour_pretrain import behaviour_step, masked_mse
     encoder.to(device).eval(), decoder.to(device).eval()
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
     losses = {}
     with torch.no_grad():
-        for label, members in subsets.items():
-            batches = [behaviour_step(encoder, decoder,
+        for label, members in list(subsets.items()) + [("mean code", None)]:
+            batches = []
+            for batch in loader:
+                drivers, target = batch["drivers"].to(device), batch["target"].to(device)
+                step = behaviour_step(encoder, decoder,
                                       {name: batch[name].to(device) for name in encoder.encoders},
-                                      batch["drivers"].to(device), batch["target"].to(device),
-                                      modalities=members)["series"].item() for batch in loader]
+                                      drivers, target, modalities=members)
+                if label == "mean code":
+                    code = step["code"].mean(dim=0, keepdim=True).expand_as(step["code"])
+                    batches.append(masked_mse(decoder(drivers, code), target).item())
+                else:
+                    batches.append(step["series"].item())
             losses[label or "all"] = float(np.mean(batches))
     return losses
 
@@ -443,7 +461,7 @@ def standardized_aux(early: pd.DataFrame, train_sites: List[str]) -> pd.DataFram
 
 def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: float,
                  n_statics: int = 0, image_shape: Optional[Tuple[int, int, int]] = None,
-                 patch_size: int = 16):
+                 patch_size: int = 16, gauged: bool = True):
     """
     Builds the readers and the decoder from Flow Forecast parts.
 
@@ -453,6 +471,8 @@ def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: floa
     :type image_shape: Tuple[int, int, int], optional
     :param patch_size: Side of the image patches in pixels.
     :type patch_size: int
+    :param gauged: Include the reader of the gauged record, defaults to True.
+    :type gauged: bool, optional
     :return: The encoder (readers ``history``, ``statics``, ``image``) and the decoder.
     :rtype: tuple
     """
@@ -463,8 +483,10 @@ def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: floa
                                                                TabularEncoder)
     transformer = {"dim": dim, "depth": depth, "heads": 4, "dim_head": dim // 4,
                    "mlp_dim": 2 * dim, "dropout": dropout}
-    readers = {"history": PanelSequenceEncoder(HISTORY_CHANNELS, YEAR_DAYS, token_kernel=14,
-                                               token_stride=7, **transformer)}
+    readers = {}
+    if gauged:
+        readers["history"] = PanelSequenceEncoder(HISTORY_CHANNELS, YEAR_DAYS, token_kernel=14,
+                                                  token_stride=7, **transformer)
     if n_statics:
         readers["statics"] = TabularEncoder(n_statics, dim=dim, hidden_dim=dim, dropout=dropout)
     if image_shape:
@@ -478,14 +500,16 @@ def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: floa
 
 
 def save_bank(arms_dir: str, name: str, codes: pd.DataFrame, sites: List[str],
-              train_sites: List[str]) -> None:
+              train_sites: List[str], scale_of: Optional[pd.DataFrame] = None) -> None:
     """
     Standardizes codes on the training basins and writes them as ``context_<name>.pt``.
 
     A basin without a code gets the training mean, so every bank covers the same basins and
-    comparisons stay on matched cohorts.
+    comparisons stay on matched cohorts. ``scale_of`` gives the codes whose training-basin
+    mean and spread are used instead of the codes' own (to keep two banks on one scale).
     """
-    fitted = codes.loc[codes.index.intersection(train_sites)]
+    fitted = codes if scale_of is None else scale_of
+    fitted = fitted.loc[fitted.index.intersection(train_sites)]
     scaled = ((codes - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-8.0, 8.0)
     scaled = scaled.reindex(sites).fillna(0.0)
     torch.save({"site_ids": list(scaled.index),
@@ -544,12 +568,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     cache = cache or pd.read_pickle(os.path.join(arms_dir, CACHE))
     daily, split = cache["daily"], cache["split"]
     sites = list(split)
-    train_sites = sorted(site for site in sites if split[site] == "train")
+    train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
     torch.manual_seed(seed)
-    order = np.random.default_rng(seed).permutation(len(train_sites))
-    n_validation = int(round(validation_fraction * len(train_sites)))
-    validation_sites = sorted(train_sites[index] for index in order[:n_validation])
-    fit_sites = sorted(train_sites[index] for index in order[n_validation:])
 
     aux, aux_head = None, None
     if aux_weight > 0:
@@ -616,6 +636,7 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
                "modality_dropout": modality_dropout if len(readers) > 1 else 0.0,
                "fit_basins": len(fit.site_ids),
                "validation_basins": len(validation.site_ids) if validation else 0,
+               "validation_fraction": validation_fraction,
                "basins_with_code": basins_with_code, "minutes": round(minutes, 2),
                "best_epoch": history.get("best_epoch", [epochs])[0],
                "validation_by_readers": by_subset,
@@ -624,6 +645,151 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
                                      for key, values in history.items()
                                      if key.startswith("validation:")}}
     os.makedirs(os.path.join(arms_dir, "reports"), exist_ok=True)
+    with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % name), "w") as file:
+        json.dump(summary, file, indent=2)
+    return summary
+
+
+def split_basins(split: Dict[str, str], seed: int, validation_fraction: float
+                 ) -> Tuple[List[str], List[str], List[str]]:
+    """Returns the training basins and their fitting and validation parts for a seed."""
+    train_sites = sorted(site for site in split if split[site] == "train")
+    order = np.random.default_rng(seed).permutation(len(train_sites))
+    n_validation = int(round(validation_fraction * len(train_sites)))
+    validation_sites = sorted(train_sites[index] for index in order[:n_validation])
+    fit_sites = sorted(train_sites[index] for index in order[n_validation:])
+    return train_sites, fit_sites, validation_sites
+
+
+def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 64,
+          depth: int = 2, dropout: float = 0.1, draws: int = 8, batch_size: int = 64,
+          lr: float = 1e-3, weight_decay: float = 1e-4, code_weight: float = 1.0,
+          validation_fraction: float = 0.15, read_passes: int = 6, device: str = "cpu",
+          static_banks: Sequence[str] = ("statics", "location"),
+          image_records: Optional[str] = None, modality_dropout: float = 0.3,
+          patch_size: int = 16, cache: Optional[Dict] = None,
+          statics: Optional[pd.DataFrame] = None,
+          images: Optional[Dict[str, np.ndarray]] = None, verbose: bool = True) -> Dict:
+    """
+    Fits the readers of an ungauged basin to the code of a finished gauge-only run.
+
+    The teacher's gauge reader and decoder are loaded and left unchanged. A second encoder
+    (statics reader, and image reader when images are given) is trained on the teacher's
+    fitting basins with two terms: the frozen decoder must reproduce a water year from the
+    new code, and the new code must match the basin's gauge code. Two banks are written, both
+    on the scale of the teacher's bank: ``context_<name>.pt`` holds every basin's code from
+    the new readers; ``context_<name>_transfer.pt`` holds the gauge code for training basins
+    and the new code for held-out basins, which is what a model fitted on gauged basins sees
+    when it is applied to ungauged ones.
+
+    :param arms_dir: Directory holding the daily cache, the banks and the teacher's files.
+    :type arms_dir: str
+    :param name: Name of the new banks.
+    :type name: str
+    :param teacher: Name of a finished gauge-only ``train`` run; its seed and split are reused.
+    :type teacher: str
+    :param code_weight: Weight of the code-matching term (in units of the teacher bank's
+        spread per number).
+    :type code_weight: float
+    :param validation_fraction: Must equal the teacher's.
+    :type validation_fraction: float
+    :param static_banks: Banks read by the statics reader.
+    :type static_banks: Sequence[str]
+    :param image_records: Root of the embedding records for an image reader, defaults to None.
+    :type image_records: str, optional
+    :return: The run summary, also written to ``reports/pretrain_<name>.json``.
+    :rtype: Dict
+    """
+    from flood_forecast.meta_models.behaviour_pretrain import pretrain_behaviour
+    with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % teacher)) as file:
+        taught = json.load(file)
+    if taught.get("readers", ["history"]) != ["history"]:
+        raise ValueError("the teacher must be a gauge-only run but reads %s" % taught["readers"])
+    cache = cache or pd.read_pickle(os.path.join(arms_dir, CACHE))
+    daily, split = cache["daily"], cache["split"]
+    sites, seed, code_dim = list(split), taught["seed"], taught["code_dim"]
+    train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
+    torch.manual_seed(seed)
+
+    gauge_reader, decoder = build_models(code_dim, taught["dim"], taught["depth"],
+                                         taught["hidden"], taught["dropout"])
+    state = torch.load(os.path.join(arms_dir, "behaviour_%s.pt" % teacher), weights_only=True)
+    gauge_reader.load_state_dict(state["encoder"]), decoder.load_state_dict(state["decoder"])
+    for parameter in decoder.parameters():
+        parameter.requires_grad_(False)
+    gauge_codes = write_codes(gauge_reader, daily, sites, taught["n_read"], read_passes,
+                              batch_size, device)
+    fitted = gauge_codes.loc[gauge_codes.index.intersection(train_sites)]
+    mean, spread = fitted.mean(), fitted.std().replace(0.0, 1.0)
+    # The new code is compared with the gauge code on the scale of the teacher's bank.
+    to_bank_scale = torch.nn.Linear(code_dim, code_dim)
+    with torch.no_grad():
+        to_bank_scale.weight.copy_(torch.diag(torch.tensor((1.0 / spread).to_numpy(),
+                                                           dtype=torch.float32)))
+        to_bank_scale.bias.copy_(torch.tensor((-mean / spread).to_numpy(), dtype=torch.float32))
+    for parameter in to_bank_scale.parameters():
+        parameter.requires_grad_(False)
+    targets = ((gauge_codes - mean) / spread).reindex(sites)
+
+    if statics is None and static_banks:
+        statics = load_static_banks(arms_dir, static_banks, train_sites)
+    if statics is not None:
+        statics = statics.reindex(sites).fillna(0.0).astype(np.float32)
+    if images is None and image_records:
+        with open(cache["manifest"]) as file:
+            states = {str(basin["site_id"]): str(basin.get("state", ""))
+                      for basin in json.load(file)["basins"]}
+        images = load_images(image_records, states, fit_sites)
+    if images is not None:
+        blank = np.zeros_like(next(iter(images.values())))
+        images = {site: images.get(site, blank) for site in sites}
+    lasting = {"statics": statics, "images": images}
+    student, _ = build_models(code_dim, dim, depth, taught["hidden"], dropout,
+                              n_statics=0 if statics is None else statics.shape[1],
+                              image_shape=None if images is None else blank.shape,
+                              patch_size=patch_size, gauged=False)
+    if not student.encoders:
+        raise ValueError("give static banks or image records for the new readers")
+    fit = WaterYearDataset(daily, fit_sites, n_read=1, draws=draws, seed=seed, aux=targets,
+                           augment=True, **lasting)
+    validation = WaterYearDataset(daily, validation_sites, n_read=1, draws=4, seed=seed,
+                                  fixed=True, aux=targets, **lasting)
+    started = time.time()
+    history = pretrain_behaviour(
+        student, decoder, fit, epochs=epochs, batch_size=batch_size, lr=lr,
+        weight_decay=weight_decay, device=device, validation_dataset=validation,
+        aux_head=to_bank_scale, aux_weight=code_weight,
+        modality_dropout=modality_dropout if len(student.encoders) > 1 else 0.0, verbose=verbose)
+    minutes = (time.time() - started) / 60.0
+    unchanged = all(torch.equal(value, state["decoder"][key])
+                    for key, value in decoder.state_dict().items())
+
+    codes = write_codes(student, daily, sites, 1, 1, batch_size, device, **lasting)
+    save_bank(arms_dir, name, codes, sites, train_sites, scale_of=gauge_codes)
+    transfer = gauge_codes.reindex(sites)
+    held_out = [site for site in sites if split[site] != "train"]
+    transfer.loc[held_out] = codes.loc[held_out]
+    save_bank(arms_dir, name + "_transfer", transfer, sites, train_sites, scale_of=gauge_codes)
+    torch.save({"encoder": student.state_dict(), "decoder": decoder.state_dict()},
+               os.path.join(arms_dir, "behaviour_%s.pt" % name))
+    gauged_check = WaterYearDataset(daily, validation_sites, n_read=taught["n_read"], draws=4,
+                                    seed=seed, fixed=True)
+    gauged = validation_losses(gauge_reader, decoder, gauged_check, {"": ("history",)},
+                               batch_size, device)
+    ungauged = validation_losses(student, decoder, validation, {"": tuple(student.encoders)},
+                                 batch_size, device)
+    summary = {"name": name, "teacher": teacher, "seed": seed, "epochs": epochs,
+               "code_dim": code_dim, "dim": dim, "depth": depth, "dropout": dropout,
+               "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
+               "code_weight": code_weight, "readers": list(student.encoders),
+               "banks": [name, name + "_transfer"], "static_banks": list(static_banks),
+               "image_records": image_records, "fit_basins": len(fit.site_ids),
+               "validation_basins": len(validation.site_ids), "minutes": round(minutes, 2),
+               "best_epoch": history["best_epoch"][0], "decoder_unchanged": unchanged,
+               "validation": {"gauge code": gauged["all"], "new code": ungauged["all"],
+                              "mean code": gauged["mean code"]},
+               "series_loss": history["series"], "code_loss": history["aux"],
+               "validation_loss": history["validation"]}
     with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % name), "w") as file:
         json.dump(summary, file, indent=2)
     return summary
@@ -691,6 +857,26 @@ def main() -> None:
                               "reader")
     trainer.add_argument("--modality-dropout", type=float, default=0.3)
     trainer.add_argument("--patch-size", type=int, default=16)
+    aligner = commands.add_parser("align", help="fit statics (and image) readers to the code "
+                                                "of a gauge-only run")
+    aligner.add_argument("--arms-dir", required=True)
+    aligner.add_argument("--name", required=True)
+    aligner.add_argument("--teacher", required=True, help="name of a finished gauge-only run")
+    aligner.add_argument("--epochs", type=int, default=60)
+    aligner.add_argument("--dim", type=int, default=64)
+    aligner.add_argument("--depth", type=int, default=2)
+    aligner.add_argument("--dropout", type=float, default=0.1)
+    aligner.add_argument("--draws", type=int, default=8)
+    aligner.add_argument("--batch-size", type=int, default=64)
+    aligner.add_argument("--lr", type=float, default=1e-3)
+    aligner.add_argument("--weight-decay", type=float, default=1e-4)
+    aligner.add_argument("--code-weight", type=float, default=1.0)
+    aligner.add_argument("--validation-fraction", type=float, default=0.15)
+    aligner.add_argument("--device", default="cpu")
+    aligner.add_argument("--static-banks", nargs="*", default=["statics", "location"])
+    aligner.add_argument("--image-records", default=None)
+    aligner.add_argument("--modality-dropout", type=float, default=0.3)
+    aligner.add_argument("--patch-size", type=int, default=16)
     shuffler = commands.add_parser("shuffle", help="write a bank permuted within each split")
     shuffler.add_argument("--arms-dir", required=True)
     shuffler.add_argument("--name", required=True)
@@ -704,10 +890,10 @@ def main() -> None:
         print("wrote context_%s.pt" % shuffle_bank(args.arms_dir, args.name, args.seed))
         return
     options = {key: value for key, value in vars(args).items() if key != "command"}
-    summary = train(**options)
+    summary = align(**options) if args.command == "align" else train(**options)
     print(json.dumps({key: value for key, value in summary.items()
-                      if key not in ("series_loss", "validation_loss", "validation_curves")},
-                     indent=2))
+                      if key not in ("series_loss", "validation_loss", "validation_curves",
+                                     "code_loss")}, indent=2))
 
 
 if __name__ == "__main__":

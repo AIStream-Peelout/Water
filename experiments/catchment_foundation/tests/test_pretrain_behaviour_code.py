@@ -253,7 +253,7 @@ class TestTrain(unittest.TestCase):
         self.assertEqual(sorted(banks), ["tiny", "tiny_gauge", "tiny_image", "tiny_statics",
                                          "tiny_ungauged"])
         self.assertEqual(sorted(summary["validation_by_readers"]),
-                         ["all", "gauge", "image", "statics", "ungauged"])
+                         ["all", "gauge", "image", "mean code", "statics", "ungauged"])
         for bank in banks.values():
             self.assertEqual(sorted(bank.index), sorted(sites))
         held, fitted = sites[30:], sites[:30]
@@ -268,6 +268,54 @@ class TestTrain(unittest.TestCase):
         self.assertGreater(held_out_correlation(banks["tiny_ungauged"]), 0.8)
         self.assertGreater(held_out_correlation(banks["tiny"]), 0.8)
         self.assertFalse(np.allclose(banks["tiny"].to_numpy(), banks["tiny_ungauged"].to_numpy()))
+        self.assertLess(summary["validation_by_readers"]["all"],
+                        summary["validation_by_readers"]["mean code"])
+
+    def test_aligned_readers_write_into_the_gauge_code_without_changing_it(self):
+        rng = np.random.default_rng(2)
+        gains = np.exp(rng.uniform(np.log(0.05), np.log(2.0), 40))
+        daily = {"s%02d" % index: synthetic_daily(gain, index, start="2015-01-01")
+                 for index, gain in enumerate(gains)}
+        sites = list(daily)
+        split = {site: "holdout" if index >= 30 else "train" for index, site in enumerate(sites)}
+        cache = {"daily": daily, "split": split}
+        wetness = (np.log(gains) - np.log(gains[:30]).mean()) / np.log(gains[:30]).std()
+        statics = pd.DataFrame({0: wetness + rng.normal(0.0, 0.1, 40), 1: rng.normal(size=40)},
+                               index=sites)
+        with tempfile.TemporaryDirectory() as tmp:
+            pretrain.train(tmp, "gauge", seed=3, epochs=12, code_dim=4, dim=16, depth=1,
+                           hidden=16, dropout=0.0, n_read=2, draws=4, batch_size=16, lr=3e-3,
+                           validation_fraction=0.2, read_passes=2, cache=cache, verbose=False)
+            before = torch.load(os.path.join(tmp, "behaviour_gauge.pt"), weights_only=True)
+            summary = pretrain.align(tmp, "student", "gauge", epochs=30, dim=16, depth=1,
+                                     dropout=0.0, draws=4, batch_size=16, lr=3e-3,
+                                     validation_fraction=0.2, read_passes=2, cache=cache,
+                                     statics=statics, static_banks=(), verbose=False)
+            after = torch.load(os.path.join(tmp, "behaviour_student.pt"), weights_only=True)
+            gauge, student, transfer = (tabular.load_bank(tmp, name)
+                                        for name in ("gauge", "student", "student_transfer"))
+            with self.assertRaises(ValueError):                  # the teacher must read the gauge
+                pretrain.align(tmp, "again", "student", cache=cache, statics=statics,
+                               verbose=False)
+        self.assertTrue(summary["decoder_unchanged"])
+        for key, value in before["decoder"].items():
+            torch.testing.assert_close(after["decoder"][key], value)
+        self.assertEqual(summary["readers"], ["statics"])
+        self.assertEqual((summary["fit_basins"], summary["validation_basins"]), (24, 6))
+        held, fitted = sites[30:], sites[:30]
+        # Training basins keep their gauge code; held-out basins get the code from statics.
+        np.testing.assert_allclose(transfer.loc[fitted].to_numpy(), gauge.loc[fitted].to_numpy(),
+                                   atol=1e-5)
+        np.testing.assert_allclose(transfer.loc[held].to_numpy(), student.loc[held].to_numpy(),
+                                   atol=1e-5)
+        # The two codes share a space: a readout fitted on gauge codes works on the new codes.
+        design = np.column_stack([gauge.loc[fitted].to_numpy(), np.ones(len(fitted))])
+        weights = np.linalg.lstsq(design, np.log(gains[:30]), rcond=None)[0]
+        predicted = np.column_stack([transfer.loc[held].to_numpy(), np.ones(len(held))]) @ weights
+        self.assertGreater(np.corrcoef(predicted, np.log(gains[30:]))[0, 1], 0.8)
+        checks = summary["validation"]
+        self.assertLess(checks["gauge code"], checks["mean code"])
+        self.assertLess(checks["new code"], checks["mean code"])
 
 
 if __name__ == "__main__":
