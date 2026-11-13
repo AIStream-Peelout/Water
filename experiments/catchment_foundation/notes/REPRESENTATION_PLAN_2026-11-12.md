@@ -219,3 +219,62 @@ Caveats:
   the snowpack input is empty outside CO, UT and WY; a snowpack number was left out of the
   description for that reason.
 - Not done: which of the 18 numbers carry the forecast gain (per-number importance).
+
+## 8. Step 2, first result: a code pretrained on behaviour, read from the gauged record (2026-11-12)
+
+**What was built.** Flow Forecast branch `behaviour-pretraining` (local, one commit above
+`crossformer-static-conditioning`) adds `flood_forecast/meta_models/behaviour_pretrain.py`: the
+existing `MultiModalEncoder` writes a code, a shared recurrent decoder must reproduce a target
+series from its drivers and the code, optional side targets are read linearly from the code,
+and modality dropout trains the code to work from any subset of readers. Water's
+`pretrain_behaviour_code.py` feeds it the pre-2022 daily record in physical units (log flow in
+mm per day, rain, temperature at basin elevation, evaporation demand, season): the reader sees
+three water years, the decoder gets the weather of a fourth and must reproduce its flow.
+Settings: 32-number code, 343 fitting and 60 validation basins (all from the 403 training
+basins; the epoch is picked on the validation basins), 60 epochs, about 10 minutes on CPU and
+under 1 GB. Two variants: reconstruction only, and reconstruction plus 14 behaviour numbers of
+the fitting basins as side targets. Held-out basins are never trained on; their codes come from
+their own pre-2022 record, which is what the hand-built description also reads.
+
+**Scores.** 123 held-out basins, targets from 2022 on; mean of three seeds (each seed is a new
+encoder, readout and forecaster). Forecast is the error cut against flow + weather + snow on
+2023 onward, day 1–3 / 4–7 / 8–14.
+
+| Description | Forecast error cut | Flood size | Flood ÷ mean flow | Storm response | Low flow | Regime | Similar behaviour | Donor flow |
+|---|---|---|---|---|---|---|---|---|
+| Physical statics (102) | +2.6 / +3.0 / +3.9% | 0.62 | 0.53 | 0.67 | 0.34 | 0.46 | 0.33 | 0.30 |
+| Hand-built, gauged (18) | +7.5 / +8.3 / +9.8% | 0.87 | 0.87 | 0.91 | 0.87 | 0.77 | 0.76 | 0.39 |
+| Pretrained code, reconstruction only (32) | +2.4 / +2.4 / +5.0% | 0.64 | 0.37 | 0.75 | 0.86 | 0.59 | 0.55 | 0.42 |
+| Pretrained code, with side targets (32) | +5.3 / +6.5 / +8.4% | 0.74 | 0.69 | 0.82 | 0.87 | 0.65 | 0.62 | 0.43 |
+| v10 (256), one encoder seed | −2.1 / −0.9 / +1.0% | 0.48 | 0.46 | 0.63 | 0.62 | 0.47 | 0.23 | 0.06 |
+
+Readings:
+
+1. **Rule 1 is met by the code with side targets.** It is above physical statics on all seven
+   suite tasks in all three seeds; the 95% interval of the difference excludes zero in 20 of
+   the 21 task-seed pairs (the exception is flood ÷ mean flow in one seed). It is the first
+   learned representation here that helps the forecaster on unseen basins. Three seeds on fold
+   0, so this is a development-fold result.
+2. **Rule 2, the forecasting gate, is not met yet.** The frozen code is 1.4 to 2.2 points of
+   error cut below the 18 hand-built numbers, and below them on floods, storm response, regime
+   and similar behaviour (level on low flow). The gate applies to the aligned code (step 3),
+   which has not been tried.
+3. **The side targets carry much of the gain.** Reconstruction alone gives a code that beats
+   statics on low flow, regime, similar behaviour and donor flow, ties on flood size, loses on
+   flood ÷ mean flow (0.37 against 0.53) and helps the forecaster no more than statics. The
+   loss is on log flow, which weights quiet days as much as floods. With side targets the code
+   is in part a learned compression of the hand-built numbers.
+4. **Donor flow is the one task where the code leads** (0.43 against 0.39; seeds 0.40 to
+   0.47), in line with the reading in §7 that a compact code is a better similarity space.
+5. **More epochs do not help; the run is limited by the number of basins.** At 150 epochs
+   (one seed) the loss on the fitting basins keeps falling (0.42 to 0.36) while the validation
+   basins move from 0.530 to 0.512. Downstream the suite is unchanged within the seed spread
+   (regime 0.63 to 0.67, donor flow 0.40 to 0.47, the rest within 0.01) and the forecast gain
+   is no better (+3.6 / +4.4 / +7.5% against +5.8 / +6.3 / +8.6% for the same seed at 60).
+
+What this does not show: nothing about ungauged basins (this code reads the gauge), nothing
+about imagery, and nothing on fold 1.
+
+Next, in order: (a) add the statics and imagery readers with modality dropout and score the
+code with the gauge reader off against statics and location (rule 3); (b) align the code to
+forecasting (rule 2); (c) more basins.
