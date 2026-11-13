@@ -15,7 +15,8 @@ years no representation read. Three task families (forecasting is scored separat
 it writes a hand-built description next to the other context banks (``context_response.pt``: how
 flow relates to weather; ``context_extremes.pt``: past flood and low-flow sizes;
 ``context_location.pt``); from the record after the cutoff it writes the targets
-(``benchmark.pkl``). ``run`` scores any ``+``-joined list of banks.
+(``benchmark.pkl``). ``run`` scores any ``+``-joined list of banks. ``recover`` asks how much of
+one description another can reproduce on held-out basins (the job of an ungauged student).
 
 Example::
 
@@ -555,6 +556,49 @@ def run(arms_dir: str, representations: List[str], reference: str, seed: int, n_
     return report
 
 
+def recover(arms_dir: str, sources: List[str], targets: str, seed: int,
+            output: Optional[str]) -> pd.DataFrame:
+    """
+    Measures how much of a target description each source reproduces on held-out basins.
+
+    :param arms_dir: Directory of the context banks and ``benchmark.pkl``.
+    :type arms_dir: str
+    :param sources: Representations to predict from.
+    :type sources: List[str]
+    :param targets: Representation whose columns are predicted one by one.
+    :type targets: str
+    :param seed: Seed of the readouts.
+    :type seed: int
+    :param output: Optional JSON path for the table.
+    :type output: str, optional
+    :return: Held-out R2 per target column (rows) and source (columns).
+    :rtype: pd.DataFrame
+    """
+    split = pd.read_pickle(os.path.join(arms_dir, "benchmark.pkl"))["split"]
+    train = sorted(split.index[split == "train"])
+    held = sorted(split.index[split == "holdout"])
+    wanted = load_representation(targets, arms_dir, train)
+    names = []
+    for group in targets.split("+"):
+        width = tabular.basin_block(group, arms_dir, train).shape[1]
+        known = {"response": RESPONSE, "extremes": EXTREMES}.get(group, [])
+        names += ["%s:%s" % (group, known[i] if len(known) == width else i) for i in range(width)]
+    table = pd.DataFrame(index=names, columns=sources, dtype=float)
+    for source in sources:
+        features = load_representation(source, arms_dir, train)
+        for column, name in enumerate(names):
+            fit, truth = wanted.loc[train, column].to_numpy(), wanted.loc[held, column].to_numpy()
+            model, _ = choose_readout(features.loc[train].to_numpy(), fit, False, seed)
+            error = ((model.predict(features.loc[held].to_numpy()) - truth) ** 2).sum()
+            table.loc[name, source] = 1.0 - error / ((truth - fit.mean()) ** 2).sum()
+    print(table.round(2).to_string())
+    print("mean  " + "  ".join("%s %.2f" % (source, table[source].mean()) for source in sources))
+    if output:
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        table.to_json(output, indent=1)
+    return table
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -574,9 +618,17 @@ def main() -> None:
     runner.add_argument("--seed", type=int, default=0)
     runner.add_argument("--n-boot", type=int, default=2000)
     runner.add_argument("--output", default=None)
+    recoverer = commands.add_parser("recover", help="predict one description from others")
+    recoverer.add_argument("--arms-dir", required=True)
+    recoverer.add_argument("--from", dest="sources", nargs="+", required=True)
+    recoverer.add_argument("--targets", default="signatures+response+extremes")
+    recoverer.add_argument("--seed", type=int, default=0)
+    recoverer.add_argument("--output", default=None)
     args = parser.parse_args()
     if args.command == "build":
         build(args.manifest, args.arms_dir, args.gauges_root, args.workers)
+    elif args.command == "recover":
+        recover(args.arms_dir, args.sources, args.targets, args.seed, args.output)
     else:
         run(args.arms_dir, args.representations, args.reference, args.seed, args.n_boot,
             args.output)
