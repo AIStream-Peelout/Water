@@ -276,8 +276,8 @@ What this does not show: nothing about ungauged basins (this code reads the gaug
 about imagery, and nothing on fold 1.
 
 Next, in order: (a) add the statics and imagery readers with modality dropout and score the
-code with the gauge reader off against statics and location (rule 3); (b) align the code to
-forecasting (rule 2); (c) more basins.
+code with the gauge reader off against statics and location (rule 3), done in §9; (b) align
+the code to forecasting (rule 2); (c) more basins.
 
 ## 9. Step 2, second result: statics and reach-image readers added, trained together (2026-11-13)
 
@@ -363,6 +363,51 @@ Readings:
 5. **Statics + location is the ungauged bar in the forecaster** (+3.6 / +4.1 / +5.0%),
    slightly above either alone.
 
+**Second version, in the order of §3: gauge reader first, statics reader fitted to it.**
+`pretrain_behaviour_code.py align` loads the gauge-only run of §8 and leaves its reader and
+decoder unchanged (the run report checks the decoder weights). A statics reader (statics +
+location; no image reader, given reading 3) is trained on the same fitting basins so that the
+frozen decoder reproduces a water year from its code and its code matches the basin's gauge
+code. 5 minutes per seed on CPU. Two banks, both on the scale of the gauge bank: `student`
+(every basin's code from statics) and `transfer` (gauge code for training basins, statics code
+for held-out basins: what a model fitted on gauged basins sees when applied to ungauged ones).
+
+| Description | Forecast error cut | Flood size | Flood ÷ mean flow | Storm response | Low flow | Regime | Similar behaviour | Donor flow |
+|---|---|---|---|---|---|---|---|---|
+| Physical statics (102) | +2.6 / +3.0 / +3.9% | 0.62 | 0.53 | 0.67 | 0.34 | 0.46 | 0.33 | 0.30 |
+| Statics + location (104) | +3.6 / +4.1 / +5.0% | 0.65 | 0.49 | 0.64 | 0.34 | 0.47 | 0.33 | 0.28 |
+| Gauge code of §8, unchanged | +5.3 / +6.5 / +8.4% | 0.74 | 0.69 | 0.82 | 0.87 | 0.65 | 0.62 | 0.43 |
+| Statics code, every basin | +2.4 / +3.3 / +3.9% | 0.60 | 0.46 | 0.54 | 0.17 | 0.46 | 0.35 | 0.29 |
+| Transfer: gauge code in training, statics code held out | +0.7 / +2.4 / +3.9% | 0.54 | 0.46 | 0.56 | 0.14 | 0.46 | 0.38 | 0.23 |
+
+Validation error (as in the table above; seeds 0 / 1 / 2): mean code 1.77 / 1.43 / 1.26,
+statics code 1.24 / 0.88 / 0.86, gauge code 0.51 / 0.51 / 0.43. The statics reader is at its
+best after 7, 3 and 26 epochs and overfits from there.
+
+6. **The gauged path is whole again and the two codes share a space.** A gauged basin gets
+   the code of §8; an ungauged basin gets a code in the same space from its statics. Readouts
+   and neighbour search fitted on gauge codes work on statics codes about as well as when
+   fitted on statics codes: the transfer row is within the seed spread of the row above it,
+   except the short forecast band (+0.7 against +2.4%) and donor flow (0.23 against 0.29).
+   Looking up gauged donors for an ungauged basin is the one place the shared space leads
+   statics (similar behaviour 0.38 against 0.33, interval above zero in two seeds).
+7. **Rule 3 is still not met, for the reason in reading 2.** The statics code is −0.2 / 0.0 /
+   −0.5 points against statics in the forecaster and level or lower on the suite (storm
+   response 0.54 against 0.67, low flow 0.17 against 0.34). Fitting it separately changed
+   nothing about what the statics know.
+
+Where step 2 stands: one embedding, a gauge reader that meets rule 1 (§8), a statics reader
+that puts ungauged basins in the same space at the level of raw statics, and no usable image
+reader. The limits are the number of distinct basins (343 to fit on; §8 reading 5 and the
+early overfitting of the statics reader) and what the ungauged inputs contain.
+
 What this does not show: nothing on fold 1; no test of catchment-wide inputs (the patches are
 centred on the gauge, and the statics hold no land cover, dams or withdrawals); no test of the
-weather record of an ungauged basin as a reader.
+weather record of an ungauged basin as a reader; the aligned code has not been tuned (one
+setting, code-matching weight 1).
+
+Next, in order of expected effect: (a) more basins for pretraining (step 5 of §5), which is
+the only lever that bears on both readers; (b) align the gauge code to forecasting (rule 2),
+which needs no new data; (c) catchment-wide inputs for the ungauged readers (land cover, dams,
+terrain over the basin and not a patch at the gauge), with the hand-built imagery numbers of
+reading 3 as the first check of any new image source.
