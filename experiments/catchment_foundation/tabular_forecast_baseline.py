@@ -65,6 +65,61 @@ N_SIGNATURES = 8      # prepare_context_ablation.py appends the flow signatures 
 REFERENCE = "flow+weather+snow"
 
 
+def load_hourly(basin: Dict) -> Optional[pd.DataFrame]:
+    """
+    Reads one basin's hourly flow and gridded forcing.
+
+    :param basin: Manifest entry with ``csv_path``.
+    :type basin: Dict
+    :return: Frame indexed by naive UTC hour with ``cfs`` (negative values clipped to zero) and
+        the forcing columns, or None when the file cannot be read.
+    :rtype: pd.DataFrame, optional
+    """
+    columns = ["precipitation", "temperature", "shortwave_radiation", "pet_mm_hr"]
+    try:
+        hourly = pd.read_csv(basin["csv_path"], usecols=["datetime", "cfs"] + columns,
+                             parse_dates=["datetime"]).set_index("datetime").sort_index()
+    except (OSError, ValueError):
+        return None
+    if hourly.index.tz is not None:
+        hourly.index = hourly.index.tz_convert("UTC").tz_localize(None)
+    hourly = hourly[~hourly.index.duplicated()].apply(pd.to_numeric, errors="coerce")
+    hourly["cfs"] = hourly["cfs"].clip(lower=0)
+    return hourly
+
+
+def daily_frame(hourly: pd.DataFrame, basin: Dict) -> pd.DataFrame:
+    """
+    Aggregates a basin's hourly record to days.
+
+    :param hourly: Output of :func:`load_hourly`.
+    :type hourly: pd.DataFrame
+    :param basin: Manifest entry (``area_sq_km``, ``flow_scale_mm_hr``, optional
+        ``swe_csv_path``).
+    :type basin: Dict
+    :return: Daily frame with ``q`` (flow in the forecasters' per-basin standardized units),
+        ``q_mm`` (flow in mm per day over the basin), ``p`` and ``pet`` (mm per day), ``t``
+        (deg C), ``sw`` and ``swe`` (snowpack, NaN without a snowpack file).
+    :rtype: pd.DataFrame
+    """
+    flow_mm_hr = hourly["cfs"] * CFS_TO_MM_HR / basin["area_sq_km"]
+    counted = flow_mm_hr.resample("1D").count() >= 18
+    daily = pd.DataFrame({
+        "q": (flow_mm_hr / basin["flow_scale_mm_hr"]).resample("1D").mean().where(counted),
+        "q_mm": (24.0 * flow_mm_hr.resample("1D").mean()).where(counted),
+        "p": hourly["precipitation"].resample("1D").sum(min_count=18),
+        "t": hourly["temperature"].resample("1D").mean() - 273.15,
+        "sw": hourly["shortwave_radiation"].resample("1D").mean(),
+        "pet": hourly["pet_mm_hr"].resample("1D").sum(min_count=18)})
+    daily["swe"] = np.nan
+    swe_path = basin.get("swe_csv_path")
+    if swe_path and os.path.exists(swe_path):
+        series = pd.read_csv(swe_path, parse_dates=["datetime"]).set_index("datetime")
+        series = pd.to_numeric(series.iloc[:, 0], errors="coerce")
+        daily["swe"] = series[~series.index.duplicated()].reindex(daily.index).ffill(limit=10)
+    return daily
+
+
 def basin_table(basin: Dict, fit_stride: int, eval_stride: int) -> Optional[pd.DataFrame]:
     """
     Builds one basin's daily feature and target rows.
@@ -78,29 +133,10 @@ def basin_table(basin: Dict, fit_stride: int, eval_stride: int) -> Optional[pd.D
     :return: Rows indexed by issue date, or None when the hourly file cannot be read.
     :rtype: pd.DataFrame, optional
     """
-    columns = ["precipitation", "temperature", "shortwave_radiation", "pet_mm_hr"]
-    try:
-        hourly = pd.read_csv(basin["csv_path"], usecols=["datetime", "cfs"] + columns,
-                             parse_dates=["datetime"]).set_index("datetime").sort_index()
-    except (OSError, ValueError):
+    hourly = load_hourly(basin)
+    if hourly is None:
         return None
-    if hourly.index.tz is not None:
-        hourly.index = hourly.index.tz_convert("UTC").tz_localize(None)
-    hourly = hourly[~hourly.index.duplicated()].apply(pd.to_numeric, errors="coerce")
-    scale = basin["area_sq_km"] * basin["flow_scale_mm_hr"] / CFS_TO_MM_HR
-    flow = hourly["cfs"].clip(lower=0) / scale
-    daily = pd.DataFrame({
-        "q": flow.resample("1D").mean().where(flow.resample("1D").count() >= 18),
-        "p": hourly["precipitation"].resample("1D").sum(min_count=18),
-        "t": hourly["temperature"].resample("1D").mean() - 273.15,
-        "sw": hourly["shortwave_radiation"].resample("1D").mean(),
-        "pet": hourly["pet_mm_hr"].resample("1D").sum(min_count=18)})
-    daily["swe"] = np.nan
-    swe_path = basin.get("swe_csv_path")
-    if swe_path and os.path.exists(swe_path):
-        series = pd.read_csv(swe_path, parse_dates=["datetime"]).set_index("datetime")
-        series = pd.to_numeric(series.iloc[:, 0], errors="coerce")
-        daily["swe"] = series[~series.index.duplicated()].reindex(daily.index).ffill(limit=10)
+    daily = daily_frame(hourly, basin)
 
     rows = pd.DataFrame(index=daily.index)
     rows["q0"] = daily.q
@@ -165,6 +201,39 @@ def load_bank(arms_dir: str, name: str) -> pd.DataFrame:
     return pd.DataFrame(values[:, keep], index=[str(site) for site in bank["site_ids"]])
 
 
+def basin_block(group: str, arms_dir: str, fitted_sites: List[str]) -> pd.DataFrame:
+    """
+    Loads one per-basin feature group.
+
+    :param group: ``signatures`` (the flow signatures inside the ``statics_signatures`` bank),
+        ``<bank>_pca<k>`` (the first k principal components, axes fitted on ``fitted_sites``)
+        or the name of any ``context_<name>.pt`` bank in ``arms_dir``.
+    :type group: str
+    :param arms_dir: Directory holding the prepared context banks.
+    :type arms_dir: str
+    :param fitted_sites: Basins a downstream model is fitted on.
+    :type fitted_sites: List[str]
+    :return: Features indexed by site id.
+    :rtype: pd.DataFrame
+    """
+    if group == "signatures":
+        return load_bank(arms_dir, "statics_signatures").iloc[:, -N_SIGNATURES:]
+    if "_pca" in group:
+        name, _, components = group.rpartition("_pca")
+        bank = load_bank(arms_dir, name)
+        fitted = bank.loc[bank.index.intersection(fitted_sites)].to_numpy()
+        centre = fitted.mean(axis=0)
+        _, _, axes = np.linalg.svd(fitted - centre, full_matrices=False)
+        return pd.DataFrame((bank.to_numpy() - centre) @ axes[:int(components)].T,
+                            index=bank.index)
+    return load_bank(arms_dir, group)
+
+
+def arm_groups(arm: str) -> tuple:
+    """Returns the feature groups of an arm: a named arm, or any ``+``-joined list of groups."""
+    return ARMS.get(arm) or tuple(arm.split("+"))
+
+
 def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndarray):
     """
     Assembles one arm's feature matrix.
@@ -207,20 +276,9 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
                 # identifier into two digits, which two tree splits recombine.
                 base = int(np.ceil(np.sqrt(len(fitted))))
                 block = np.stack([codes // base, codes % base], axis=1)
-        elif group == "signatures":
-            bank = load_bank(arms_dir, "statics_signatures").iloc[:, -N_SIGNATURES:]
-            block = bank.reindex(data.site_id).to_numpy(np.float32)
-        elif "_pca" in group:
-            name, _, components = group.rpartition("_pca")
-            bank = load_bank(arms_dir, name)
-            fitted = bank.loc[bank.index.intersection(sorted(set(data.loc[fit_rows, "site_id"])))]
-            centre = fitted.to_numpy().mean(axis=0)
-            _, _, axes = np.linalg.svd(fitted.to_numpy() - centre, full_matrices=False)
-            reduced = pd.DataFrame((bank.to_numpy() - centre) @ axes[:int(components)].T,
-                                   index=bank.index)
-            block = reduced.reindex(data.site_id).to_numpy(np.float32)
         else:
-            block = load_bank(arms_dir, group).reindex(data.site_id).to_numpy(np.float32)
+            bank = basin_block(group, arms_dir, sorted(set(data.loc[fit_rows, "site_id"])))
+            block = bank.reindex(data.site_id).to_numpy(np.float32)
         blocks.append(block)
         categorical += [group == "basin_id"] * block.shape[1]
     return np.hstack(blocks), categorical
@@ -290,7 +348,7 @@ def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int,
           % (data.site_id.nunique(), len(fit_index), data.site_id[fit_rows].nunique()), flush=True)
     predictions, started = {}, time.time()
     for arm in arm_names:
-        matrix, categorical = features(data, ARMS[arm], arms_dir, fit_rows)
+        matrix, categorical = features(data, arm_groups(arm), arms_dir, fit_rows)
         for band in BANDS:
             model = HistGradientBoostingRegressor(
                 max_iter=300, learning_rate=0.06, max_leaf_nodes=31, min_samples_leaf=40,
@@ -343,11 +401,12 @@ def main() -> None:
     runner.add_argument("--data", required=True)
     runner.add_argument("--arms-dir", required=True,
                         help="Directory of context_<name>.pt banks from prepare_context_ablation.py")
-    runner.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS))
+    runner.add_argument("--arms", nargs="+", default=list(ARMS),
+                        help="Named arms, or any +-joined list of feature groups and bank names")
     runner.add_argument("--fit-subsample", type=int, default=1,
                         help="Keep every n-th fitting row (large cohorts)")
     runner.add_argument("--seed", type=int, default=0)
-    runner.add_argument("--reference", default=None, choices=list(ARMS),
+    runner.add_argument("--reference", default=None,
                         help="Arm every other arm is paired against (default: %s)" % REFERENCE)
     runner.add_argument("--output", default=None)
     args = parser.parse_args()
