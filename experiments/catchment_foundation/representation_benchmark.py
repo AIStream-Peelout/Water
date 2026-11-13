@@ -34,7 +34,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -499,8 +499,13 @@ TASKS = EXTREME_TARGETS + ["regime", "similar_behaviour", "similar_flow"]
 
 
 def run(arms_dir: str, representations: List[str], reference: str, seed: int, n_boot: int,
-        output: Optional[str]) -> Dict:
-    """Scores the representations, prints the tables and returns the report."""
+        output: Optional[str], also_pair: Sequence[str] = ()) -> Dict:
+    """
+    Scores the representations, prints the tables and returns the report.
+
+    Every representation is compared with ``reference`` and, under ``paired``, with each
+    representation in ``also_pair`` (difference of scores and its basin-bootstrap interval).
+    """
     benchmark = pd.read_pickle(os.path.join(arms_dir, "benchmark.pkl"))
     split = benchmark["split"]
     train_sites = sorted(split.index[split == "train"])
@@ -526,6 +531,11 @@ def run(arms_dir: str, representations: List[str], reference: str, seed: int, n_
                 paired = results[reference][task]
                 stats["vs_reference"] = stats["score"] - statistic(paired)
                 stats["vs_reference_ci95"] = interval(result, paired, n_boot=n_boot)
+            for other in also_pair:
+                if other != spec and other in results:
+                    stats.setdefault("paired", {})[other] = {
+                        "difference": stats["score"] - statistic(results[other][task]),
+                        "ci95": interval(result, results[other][task], n_boot=n_boot)}
             entry[task] = stats
         entry["extremes_mean"] = float(np.mean([entry[name]["score"]
                                                 for name in EXTREME_TARGETS]))
@@ -549,6 +559,14 @@ def run(arms_dir: str, representations: List[str], reference: str, seed: int, n_
             line += "%18s" % ("%+.2f%s(%+.2f,%+.2f)" % (
                 stats["vs_reference"], "*" if low > 0 or high < 0 else " ", low, high))
         print(line)
+    for other in also_pair:
+        print("\nDifference from %s (95%% interval; * excludes zero)" % other)
+        for spec in representations:
+            cells = [report["scores"][spec][task].get("paired", {}).get(other) for task in TASKS]
+            if all(cells):
+                print("%-44s" % spec + "".join("%18s" % ("%+.2f%s(%+.2f,%+.2f)" % (
+                    cell["difference"], "*" if cell["ci95"][0] > 0 or cell["ci95"][1] < 0 else " ",
+                    *cell["ci95"])) for cell in cells))
     if output:
         os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
         with open(output, "w") as file:
@@ -617,6 +635,8 @@ def main() -> None:
     runner.add_argument("--reference", default="statics")
     runner.add_argument("--seed", type=int, default=0)
     runner.add_argument("--n-boot", type=int, default=2000)
+    runner.add_argument("--also-pair", nargs="*", default=[],
+                        help="Further representations every one is compared with")
     runner.add_argument("--output", default=None)
     recoverer = commands.add_parser("recover", help="predict one description from others")
     recoverer.add_argument("--arms-dir", required=True)
@@ -631,7 +651,7 @@ def main() -> None:
         recover(args.arms_dir, args.sources, args.targets, args.seed, args.output)
     else:
         run(args.arms_dir, args.representations, args.reference, args.seed, args.n_boot,
-            args.output)
+            args.output, also_pair=args.also_pair)
 
 
 if __name__ == "__main__":

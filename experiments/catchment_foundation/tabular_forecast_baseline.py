@@ -31,7 +31,7 @@ import argparse
 import json
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -284,7 +284,36 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
     return np.hstack(blocks), categorical
 
 
-def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2000) -> Dict:
+def paired_cut(reference_errors: np.ndarray, arm_errors: np.ndarray, rng: np.random.Generator,
+               n_boot: int) -> Dict:
+    """
+    Compares two arms basin by basin.
+
+    :param reference_errors: Summed squared error of the reference arm per basin.
+    :type reference_errors: np.ndarray
+    :param arm_errors: Summed squared error of the arm per basin, same order.
+    :type arm_errors: np.ndarray
+    :param rng: Generator of the basin bootstrap.
+    :type rng: np.random.Generator
+    :param n_boot: Bootstrap resamples over basins.
+    :type n_boot: int
+    :return: ``error_cut_pct`` (median basin's error reduction), its ``ci95`` and
+        ``better_pct`` (share of basins where the arm has the lower error).
+    :rtype: Dict
+    """
+    ratio = np.log(reference_errors / np.maximum(arm_errors, 1e-30))
+    draws = [np.median(ratio[rng.integers(0, len(ratio), len(ratio))]) for _ in range(n_boot)]
+
+    def cut(value: float) -> float:
+        return float(100.0 * (1.0 - np.exp(-value)))
+
+    return {"error_cut_pct": cut(np.median(ratio)),
+            "ci95": [cut(np.percentile(draws, 2.5)), cut(np.percentile(draws, 97.5))],
+            "better_pct": float(100.0 * (ratio > 0).mean())}
+
+
+def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2000,
+          also_pair: Sequence[str] = ()) -> Dict:
     """
     Scores every arm per split, period and band, paired basin by basin with the reference arm.
 
@@ -296,10 +325,13 @@ def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2
     :type reference: str
     :param n_boot: Bootstrap resamples over basins, defaults to 2000.
     :type n_boot: int, optional
+    :param also_pair: Further arms every arm is paired against; the comparisons are stored
+        under ``paired`` -> that arm. Defaults to none.
+    :type also_pair: Sequence[str], optional
     :return: Nested report: split -> period -> band -> arm -> statistics.
     :rtype: Dict
     """
-    rng = np.random.default_rng(0)
+    rng, extra_rng = np.random.default_rng(0), np.random.default_rng(1)
     arms = list(dict.fromkeys(arm for arm, _ in predictions))     # in the order fitted
     report = {}
     for split in ("holdout", "train"):
@@ -321,24 +353,22 @@ def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2
                     stats = {"median_basin_skill_pct": float(np.median(skill)),
                              "basins_beating_persistence_pct": float(100.0 * (skill > 0).mean())}
                     if arm != reference and reference in errors:
-                        ratio = np.log(errors[reference] / np.maximum(errors[arm], 1e-30))
-                        draws = [np.median(ratio[rng.integers(0, len(ratio), len(ratio))])
-                                 for _ in range(n_boot)]
-
-                        def cut(value: float) -> float:
-                            return float(100.0 * (1.0 - np.exp(-value)))
-
-                        stats.update(error_cut_vs_reference_pct=cut(np.median(ratio)),
-                                     error_cut_ci95=[cut(np.percentile(draws, 2.5)),
-                                                     cut(np.percentile(draws, 97.5))],
-                                     better_than_reference_pct=float(100.0 * (ratio > 0).mean()))
+                        paired = paired_cut(errors[reference], errors[arm], rng, n_boot)
+                        stats.update(error_cut_vs_reference_pct=paired["error_cut_pct"],
+                                     error_cut_ci95=paired["ci95"],
+                                     better_than_reference_pct=paired["better_pct"])
+                    for other in also_pair:
+                        if other != arm and other in errors:
+                            stats.setdefault("paired", {})[other] = paired_cut(
+                                errors[other], errors[arm], extra_rng, n_boot)
                     entry["bands"][band][arm] = stats
             report.setdefault(split, {})[period] = entry
     return report
 
 
 def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int, seed: int,
-        output: Optional[str], reference: Optional[str] = None) -> Dict:
+        output: Optional[str], reference: Optional[str] = None,
+        also_pair: Sequence[str] = ()) -> Dict:
     """Fits every requested arm and prints and returns the scores."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     data = pd.read_pickle(data_path)
@@ -362,7 +392,7 @@ def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int,
         del matrix
     reference = reference or (REFERENCE if REFERENCE in arm_names else arm_names[0])
     report = {"data": os.path.abspath(data_path), "reference": reference, "seed": seed,
-              "scores": score(data, predictions, reference)}
+              "scores": score(data, predictions, reference, also_pair=also_pair)}
     for split, periods in report["scores"].items():
         for period, entry in periods.items():
             print("\n%s basins, %s: %d basins, %d forecasts (median skill %% / basins beating "
@@ -381,6 +411,14 @@ def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int,
                     line += "  %5.1f /%3.0f%s" % (stats["median_basin_skill_pct"],
                                                   stats["basins_beating_persistence_pct"], paired)
                 print(line)
+    held_out = report["scores"].get("holdout", {}).get("2023+")
+    for other in also_pair if held_out else ():
+        print("\nheld-out basins, 2023+: error cut vs %s (95%% interval) / basins better %%" % other)
+        for arm in arm_names:
+            cells = [held_out["bands"][band][arm].get("paired", {}).get(other) for band in BANDS]
+            if all(cells):
+                print("  %-40s" % arm + "".join("  %+5.1f (%+.0f,%+.0f) /%3.0f" % (
+                    cell["error_cut_pct"], *cell["ci95"], cell["better_pct"]) for cell in cells))
     if output:
         os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
         with open(output, "w") as file:
@@ -408,13 +446,15 @@ def main() -> None:
     runner.add_argument("--seed", type=int, default=0)
     runner.add_argument("--reference", default=None,
                         help="Arm every other arm is paired against (default: %s)" % REFERENCE)
+    runner.add_argument("--also-pair", nargs="*", default=[],
+                        help="Further arms every arm is compared with, basin by basin")
     runner.add_argument("--output", default=None)
     args = parser.parse_args()
     if args.command == "build":
         build(args.manifest, args.out, args.fit_stride, args.eval_stride)
     else:
         run(args.data, args.arms_dir, args.arms, args.fit_subsample, args.seed, args.output,
-            reference=args.reference)
+            reference=args.reference, also_pair=args.also_pair)
 
 
 if __name__ == "__main__":

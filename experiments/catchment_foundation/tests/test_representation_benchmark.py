@@ -1,8 +1,13 @@
 """Tests for the representation benchmark's behaviour numbers, donor search and scoring."""
+import contextlib
+import io
+import os
+import tempfile
 import unittest
 
 import numpy as np
 import pandas as pd
+import torch
 
 from experiments.catchment_foundation import representation_benchmark as bench
 from experiments.catchment_foundation import tabular_forecast_baseline as tabular
@@ -155,6 +160,24 @@ class TestScoring(unittest.TestCase):
             self.assertEqual(len(good[task]["sites"]), 60)
         self.assertGreater(bench.statistic(good["flood_peak"]), 0.7)
         self.assertLess(abs(bench.statistic(bad["flood_peak"])), 0.2)
+
+        # The same two through the command's entry point, each also paired with the other.
+        with tempfile.TemporaryDirectory() as tmp:
+            pd.to_pickle(benchmark, os.path.join(tmp, "benchmark.pkl"))
+            for name, frame in (("good", informative), ("bad", permuted)):
+                torch.save({"site_ids": sites, "embeddings": torch.tensor(frame.to_numpy(),
+                                                                          dtype=torch.float32)},
+                           os.path.join(tmp, "context_%s.pt" % name))
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                report = bench.run(tmp, ["good", "bad"], "bad", seed=0, n_boot=50, output=None,
+                                   also_pair=["good"])
+        scores = report["scores"]
+        for task in bench.TASKS:
+            paired = scores["bad"][task]["paired"]["good"]
+            self.assertAlmostEqual(paired["difference"], -scores["good"][task]["vs_reference"])
+            self.assertLess(paired["ci95"][1], 0.0, task)
+            self.assertNotIn("paired", scores["good"][task])
+        self.assertIn("Difference from good", printed.getvalue())
 
 
 if __name__ == "__main__":

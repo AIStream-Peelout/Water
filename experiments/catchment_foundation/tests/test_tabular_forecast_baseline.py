@@ -85,6 +85,31 @@ class TestScore(unittest.TestCase):
         self.assertAlmostEqual(band["flow+weather+snow+some_bank"]["median_basin_skill_pct"], 75.0)
         self.assertEqual(list(band), ["flow+weather+snow", "flow", "flow+weather+snow+some_bank"])
 
+    def test_arms_can_also_be_paired_with_other_arms(self):
+        rows = 60
+        data = pd.DataFrame({"site_id": np.repeat(["a", "b", "c"], 20), "split": "holdout",
+                             "period": "2023+"})
+        truth = np.tile(np.linspace(-1.0, 1.0, 20), 3)
+        predictions = {}
+        for band in tabular.BANDS:
+            data[f"y_{band}"] = truth
+            predictions[("flow+weather+snow", band)] = np.zeros(rows)
+            predictions[("half", band)] = 0.5 * truth                 # error a quarter
+            predictions[("most", band)] = 0.75 * truth                # error a sixteenth
+        plain = tabular.score(data, predictions, "flow+weather+snow", n_boot=50)
+        report = tabular.score(data, predictions, "flow+weather+snow", n_boot=50,
+                               also_pair=["half"])
+        band = report["holdout"]["2023+"]["bands"]["day4-7"]
+        paired = band["most"]["paired"]["half"]
+        self.assertAlmostEqual(paired["error_cut_pct"], 75.0)         # 1/16 against 1/4
+        self.assertEqual(paired["better_pct"], 100.0)
+        self.assertAlmostEqual(band["flow+weather+snow"]["paired"]["half"]["error_cut_pct"],
+                               -300.0)
+        self.assertNotIn("paired", band["half"])
+        # The comparison with the reference is untouched by the extra pairs.
+        self.assertEqual(band["most"]["error_cut_ci95"],
+                         plain["holdout"]["2023+"]["bands"]["day4-7"]["most"]["error_cut_ci95"])
+
     def test_an_arm_is_a_named_arm_or_any_joined_list_of_groups(self):
         self.assertEqual(tabular.arm_groups("flow+weather"), ("flow", "weather"))
         self.assertEqual(tabular.arm_groups("flow+snow+some_bank"), ("flow", "snow", "some_bank"))
