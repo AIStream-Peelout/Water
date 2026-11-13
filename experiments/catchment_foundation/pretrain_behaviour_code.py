@@ -1,5 +1,5 @@
 """
-Pretrains a general catchment code on the daily record and writes it as a context bank.
+Pretrains a general catchment code and writes it as a context bank.
 
 Step 2 of ``notes/REPRESENTATION_PLAN_2026-11-12.md``. The reader of the gauged record sees a few
 water years of a basin's flow and weather, in physical units, and writes a short code. A decoder
@@ -7,14 +7,24 @@ shared by all basins must reproduce the flow of another water year from that yea
 the code (Flow Forecast ``behaviour_pretrain``). Nothing after the cutoff is read, held-out
 basins are never trained on, and their codes come from their own pre-cutoff record.
 
-    cache   read every basin's hourly file once and keep the pre-cutoff daily record
-    train   pretrain on the training basins and write ``context_<name>.pt`` for every basin
+With ``--static-banks`` and ``--image-records`` the same code is also written by a reader of the
+static description and a reader of the reach image. Readers are switched off at random in
+training, so the code can be written from any of them: besides ``context_<name>.pt`` (all
+readers) the run writes ``context_<name>_ungauged.pt`` (no gauged record), ``_gauge``,
+``_statics`` and ``_image``.
+
+    cache    read every basin's hourly file once and keep the pre-cutoff daily record
+    train    pretrain on the training basins and write the banks for every basin
+    shuffle  write ``context_<name>_shuffled.pt``: a bank's codes permuted within each split
 
     python -m experiments.catchment_foundation.pretrain_behaviour_code cache --arms-dir <arms dir>
     python -m experiments.catchment_foundation.pretrain_behaviour_code train \
         --arms-dir <arms dir> --name behaviour_s0 --seed 0
+    python -m experiments.catchment_foundation.pretrain_behaviour_code train \
+        --arms-dir <arms dir> --name multimodal_s0 --seed 0 --aux-weight 1.0 \
+        --static-banks statics location --image-records pilot_data/embedding_dataset
 
-Score the bank with ``representation_benchmark.py run`` and ``tabular_forecast_baseline.py``.
+Score the banks with ``representation_benchmark.py run`` and ``tabular_forecast_baseline.py``.
 Flow Forecast is imported from ``FF_REPO`` or ``PYTHONPATH`` (branch ``behaviour-pretraining``).
 """
 import argparse
@@ -23,7 +33,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,6 +54,8 @@ AUX = ["log_runoff_mm", "log_runoff_ratio", "snow_fraction", "zero_flow_fraction
        "recession_rate", "storm_response", "rain_flow_coupling", "rb_flashiness", "bfi",
        "melt_share", "flood_peak", "flood_ratio", "low_flow"]
 CACHE = "daily_pre_cutoff.pkl"
+IMAGE_SCALE = 3000.0                  # reflectance divisor, as in Flow Forecast's catchment loader
+HISTORY_CHANNELS = 7                  # log flow, valid flag and the five weather channels
 
 
 def daily_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame]]:
@@ -138,6 +150,75 @@ def flow_channel(block: pd.DataFrame) -> np.ndarray:
     return np.log(block.q_mm.to_numpy() + FLOW_FLOOR_MM).astype(np.float32)
 
 
+def load_static_banks(arms_dir: str, groups: Sequence[str], train_sites: List[str]
+                      ) -> pd.DataFrame:
+    """
+    Loads the static description the statics reader sees, from the banks the baselines use.
+
+    :param arms_dir: Directory of the context banks.
+    :type arms_dir: str
+    :param groups: Bank names (for example ``statics`` and ``location``); the banks are already
+        standardized on the training basins.
+    :type groups: Sequence[str]
+    :param train_sites: The training basins.
+    :type train_sites: List[str]
+    :return: One row per basin; columns that do not vary over the training basins are dropped.
+    :rtype: pd.DataFrame
+    """
+    frame = pd.concat([tabular.basin_block(group, arms_dir, train_sites) for group in groups],
+                      axis=1, join="inner")
+    frame.columns = range(frame.shape[1])
+    varying = frame.loc[frame.index.intersection(train_sites)].std() > 0
+    return frame.loc[:, varying.to_numpy()].astype(np.float32)
+
+
+def load_images(records_root: str, states: Dict[str, str], fit_sites: List[str]
+                ) -> Dict[str, np.ndarray]:
+    """
+    Loads every basin's reach image and standardizes each band on the fitting basins.
+
+    :param records_root: Root of the embedding records: ``<root>/<state>/<site>.npz`` holding
+        ``image`` of shape (bands, height, width).
+    :type records_root: str
+    :param states: Site id -> state folder.
+    :type states: Dict[str, str]
+    :param fit_sites: Basins the band means and standard deviations are fitted on.
+    :type fit_sites: List[str]
+    :return: Site id -> float32 image; a basin without a record is left out.
+    :rtype: Dict[str, np.ndarray]
+    """
+    images = {}
+    for site, state in states.items():
+        path = os.path.join(records_root, state, site + ".npz")
+        if os.path.exists(path):
+            with np.load(path) as record:
+                images[site] = np.clip(record["image"] / IMAGE_SCALE, 0.0, 2.0).astype(np.float32)
+    fitted = np.stack([images[site] for site in fit_sites if site in images])
+    mean = fitted.mean(axis=(0, 2, 3)).reshape(-1, 1, 1)
+    std = fitted.std(axis=(0, 2, 3)).reshape(-1, 1, 1)
+    return {site: ((image - mean) / np.where(std > 0, std, 1.0)).astype(np.float32)
+            for site, image in images.items()}
+
+
+def reader_subsets(readers: Sequence[str]) -> Dict[str, Tuple[str, ...]]:
+    """
+    Lists the banks a run writes: bank suffix -> the readers its codes are written from.
+
+    :param readers: The readers of the run, ``history`` first.
+    :type readers: Sequence[str]
+    :return: ``""`` for all readers; with several readers also ``gauge`` (the gauged record
+        alone), ``ungauged`` (every other reader) and one entry per other reader on its own.
+    :rtype: Dict[str, Tuple[str, ...]]
+    """
+    subsets = {"": tuple(readers)}
+    others = tuple(reader for reader in readers if reader != "history")
+    if others:
+        subsets.update({"gauge": ("history",), "ungauged": others})
+        if len(others) > 1:
+            subsets.update({reader: (reader,) for reader in others})
+    return subsets
+
+
 class WaterYearDataset(Dataset):
     """
     Serves, per basin, a few water years for the reader and another one for the decoder.
@@ -145,11 +226,14 @@ class WaterYearDataset(Dataset):
     ``history`` has shape (n_read, 365, 7): log flow (zero where missing), a flag for a valid
     flow value and the five weather channels. ``drivers`` covers the spin-up and the decoded
     year, shape (455, 5); ``target`` is the decoded year's log flow with NaN over the spin-up.
+    ``statics`` and ``image`` are added when the basin's static description and reach image are
+    given.
     """
 
     def __init__(self, daily: Dict[str, pd.DataFrame], sites: List[str], n_read: int = 3,
                  draws: int = 1, seed: int = 0, fixed: bool = False,
-                 aux: Optional[pd.DataFrame] = None):
+                 aux: Optional[pd.DataFrame] = None, statics: Optional[pd.DataFrame] = None,
+                 images: Optional[Dict[str, np.ndarray]] = None, augment: bool = False):
         """
         Initializes the dataset.
 
@@ -168,11 +252,19 @@ class WaterYearDataset(Dataset):
         :type fixed: bool, optional
         :param aux: Standardized auxiliary targets indexed by site id, defaults to None.
         :type aux: pd.DataFrame, optional
+        :param statics: Static description indexed by site id, defaults to None.
+        :type statics: pd.DataFrame, optional
+        :param images: Site id -> image of shape (bands, height, width), defaults to None.
+        :type images: Dict[str, np.ndarray], optional
+        :param augment: Turn and mirror the image at random (ignored when ``fixed``), defaults
+            to False.
+        :type augment: bool, optional
         """
         self.years = {site: water_years(daily[site]) for site in sites if site in daily}
         self.site_ids = [site for site in sites if len(self.years.get(site, [])) >= 2]
         self.daily, self.n_read, self.draws, self.fixed = daily, n_read, draws, fixed
         self.seed, self.aux = seed, aux
+        self.statics, self.images, self.augment = statics, images, augment and not fixed
         self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
@@ -196,6 +288,21 @@ class WaterYearDataset(Dataset):
         return np.column_stack([np.where(valid, flow, 0.0), valid.astype(np.float32),
                                 weather_channels(block)]).astype(np.float32)
 
+    def lasting(self, site: str, augment: bool = False) -> Dict[str, torch.Tensor]:
+        """The basin's inputs that do not change with time: static description and image."""
+        item = {}
+        if self.statics is not None:
+            item["statics"] = torch.tensor(self.statics.loc[site].to_numpy(dtype=np.float32))
+        if self.images is not None:
+            image = self.images[site]
+            if augment:
+                # North is not special for a reach: turn and mirror the image at random.
+                image = np.rot90(image, int(self.rng.integers(4)), axes=(1, 2))
+                if self.rng.integers(2):
+                    image = image[:, :, ::-1]
+            item["image"] = torch.from_numpy(np.ascontiguousarray(image))
+        return item
+
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         site, decoded, read = self.choose(index)
         block = self.daily[site][decoded - pd.Timedelta(days=SPIN_UP_DAYS):
@@ -207,6 +314,7 @@ class WaterYearDataset(Dataset):
                 "target": torch.from_numpy(target)}
         if self.aux is not None:
             item["aux"] = torch.tensor(self.aux.loc[site].to_numpy(dtype=np.float32))
+        item.update(self.lasting(site, self.augment))
         return item
 
 
@@ -215,14 +323,17 @@ class ReadYearsDataset(Dataset):
     Serves ``n_read`` water years of each basin, for writing its code.
 
     ``group`` selects which years: group g starts ``g * n_read`` years into the basin's list and
-    wraps around, so successive groups cover the whole record.
+    wraps around, so successive groups cover the whole record. With ``read_history`` off (codes
+    written without the gauged record) every basin is served and its record is left blank.
     """
 
-    def __init__(self, daily: Dict[str, pd.DataFrame], sites: List[str], n_read: int = 3):
-        self.source = WaterYearDataset(daily, [], n_read=n_read)
+    def __init__(self, daily: Dict[str, pd.DataFrame], sites: List[str], n_read: int = 3,
+                 statics: Optional[pd.DataFrame] = None,
+                 images: Optional[Dict[str, np.ndarray]] = None, read_history: bool = True):
+        self.source = WaterYearDataset(daily, [], n_read=n_read, statics=statics, images=images)
         self.years = {site: water_years(daily[site]) for site in sites if site in daily}
-        self.site_ids = [site for site in sites if self.years.get(site)]
-        self.n_read, self.group = n_read, 0
+        self.site_ids = [site for site in sites if self.years.get(site) or not read_history]
+        self.n_read, self.group, self.read_history = n_read, 0, read_history
 
     def __len__(self) -> int:
         return len(self.site_ids)
@@ -235,36 +346,83 @@ class ReadYearsDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         site = self.site_ids[index]
-        return {"history": torch.from_numpy(np.stack([self.source.member(site, year)
-                                                      for year in self.read_years(site)]))}
+        if self.read_history:
+            history = np.stack([self.source.member(site, year) for year in self.read_years(site)])
+        else:
+            history = np.zeros((self.n_read, YEAR_DAYS, HISTORY_CHANNELS), dtype=np.float32)
+        return {"history": torch.from_numpy(history), **self.source.lasting(site)}
 
 
 def write_codes(encoder, daily: Dict[str, pd.DataFrame], sites: List[str], n_read: int,
-                groups: int, batch_size: int = 64, device: str = "cpu") -> pd.DataFrame:
+                groups: int, batch_size: int = 64, device: str = "cpu",
+                statics: Optional[pd.DataFrame] = None,
+                images: Optional[Dict[str, np.ndarray]] = None,
+                readers: Optional[Sequence[str]] = None) -> pd.DataFrame:
     """
     Writes every basin's code as the mean over groups of its water years.
 
-    :param encoder: The pretrained reader.
+    :param encoder: The pretrained encoder.
     :type encoder: flood_forecast.meta_models.multimodal_encoder.MultiModalEncoder
     :param daily: Site id -> daily frame.
     :type daily: Dict[str, pd.DataFrame]
-    :param sites: Basins to encode (those without a usable water year are left out).
+    :param sites: Basins to encode. When the gauged record is read, those without a usable
+        water year are left out.
     :type sites: List[str]
     :param n_read: Water years per group.
     :type n_read: int
     :param groups: Number of groups averaged.
     :type groups: int
+    :param statics: Static description indexed by site id, defaults to None.
+    :type statics: pd.DataFrame, optional
+    :param images: Site id -> image, defaults to None.
+    :type images: Dict[str, np.ndarray], optional
+    :param readers: Write the code from these readers only, defaults to None (all of them).
+    :type readers: Sequence[str], optional
     :return: Codes indexed by site id.
     :rtype: pd.DataFrame
     """
     from flood_forecast.meta_models.contrastive_train import extract_embeddings
-    reader = ReadYearsDataset(daily, sites, n_read=n_read)
-    total = None
-    for group in range(groups):
+    read_history = readers is None or "history" in readers
+    reader = ReadYearsDataset(daily, sites, n_read=n_read, statics=statics, images=images,
+                              read_history=read_history)
+    options = {} if readers is None else {"modalities": list(readers)}
+    passes, total = groups if read_history else 1, None
+    for group in range(passes):
         reader.group = group
-        _, codes = extract_embeddings(encoder, reader, batch_size=batch_size, device=device)
+        _, codes = extract_embeddings(encoder, reader, batch_size=batch_size, device=device,
+                                      **options)
         total = codes if total is None else total + codes
-    return pd.DataFrame((total / groups).numpy(), index=reader.site_ids)
+    return pd.DataFrame((total / passes).numpy(), index=reader.site_ids)
+
+
+def validation_losses(encoder, decoder, dataset: Dataset, subsets: Dict[str, Tuple[str, ...]],
+                      batch_size: int = 64, device: str = "cpu") -> Dict[str, float]:
+    """
+    Scores the decoder on held-out basins with the code written from each subset of readers.
+
+    :param encoder: The pretrained encoder.
+    :type encoder: flood_forecast.meta_models.multimodal_encoder.MultiModalEncoder
+    :param decoder: The pretrained decoder.
+    :type decoder: torch.nn.Module
+    :param dataset: A fixed :class:`WaterYearDataset` of basins not trained on.
+    :type dataset: Dataset
+    :param subsets: Label -> readers (see :func:`reader_subsets`).
+    :type subsets: Dict[str, Tuple[str, ...]]
+    :return: Label -> mean squared error of the decoded log flow.
+    :rtype: Dict[str, float]
+    """
+    from flood_forecast.meta_models.behaviour_pretrain import behaviour_step
+    encoder.to(device).eval(), decoder.to(device).eval()
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    losses = {}
+    with torch.no_grad():
+        for label, members in subsets.items():
+            batches = [behaviour_step(encoder, decoder,
+                                      {name: batch[name].to(device) for name in encoder.encoders},
+                                      batch["drivers"].to(device), batch["target"].to(device),
+                                      modalities=members)["series"].item() for batch in loader]
+            losses[label or "all"] = float(np.mean(batches))
+    return losses
 
 
 def standardized_aux(early: pd.DataFrame, train_sites: List[str]) -> pd.DataFrame:
@@ -283,28 +441,69 @@ def standardized_aux(early: pd.DataFrame, train_sites: List[str]) -> pd.DataFram
     return ((frame - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-5.0, 5.0)
 
 
-def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: float):
-    """Builds the gauged-record reader and the decoder from Flow Forecast parts."""
+def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: float,
+                 n_statics: int = 0, image_shape: Optional[Tuple[int, int, int]] = None,
+                 patch_size: int = 16):
+    """
+    Builds the readers and the decoder from Flow Forecast parts.
+
+    :param n_statics: Width of the static description (0 leaves the statics reader out).
+    :type n_statics: int
+    :param image_shape: (bands, height, width) of the reach image (None leaves the reader out).
+    :type image_shape: Tuple[int, int, int], optional
+    :param patch_size: Side of the image patches in pixels.
+    :type patch_size: int
+    :return: The encoder (readers ``history``, ``statics``, ``image``) and the decoder.
+    :rtype: tuple
+    """
     from flood_forecast.meta_models.behaviour_pretrain import DriverConditionedDecoder
-    from flood_forecast.meta_models.multimodal_encoder import (MultiModalEncoder,
-                                                               PanelSequenceEncoder)
-    history = PanelSequenceEncoder(7, YEAR_DAYS, dim=dim, depth=depth, heads=4, dim_head=dim // 4,
-                                   mlp_dim=2 * dim, dropout=dropout, token_kernel=14,
-                                   token_stride=7)
-    encoder = MultiModalEncoder({"history": history}, dim=dim, embedding_dim=code_dim,
-                                fusion="concat", fusion_head="linear",
-                                sequence_modalities=["history"])
+    from flood_forecast.meta_models.multimodal_encoder import (ImagePatchEncoder,
+                                                               MultiModalEncoder,
+                                                               PanelSequenceEncoder,
+                                                               TabularEncoder)
+    transformer = {"dim": dim, "depth": depth, "heads": 4, "dim_head": dim // 4,
+                   "mlp_dim": 2 * dim, "dropout": dropout}
+    readers = {"history": PanelSequenceEncoder(HISTORY_CHANNELS, YEAR_DAYS, token_kernel=14,
+                                               token_stride=7, **transformer)}
+    if n_statics:
+        readers["statics"] = TabularEncoder(n_statics, dim=dim, hidden_dim=dim, dropout=dropout)
+    if image_shape:
+        readers["image"] = ImagePatchEncoder(tuple(image_shape[1:]), patch_size, image_shape[0],
+                                             **transformer)
+    encoder = MultiModalEncoder(readers, dim=dim, embedding_dim=code_dim, fusion="concat",
+                                fusion_head="linear",
+                                sequence_modalities=[name for name in ("history", "image")
+                                                     if name in readers])
     return encoder, DriverConditionedDecoder(5, code_dim, hidden_dim=hidden)
+
+
+def save_bank(arms_dir: str, name: str, codes: pd.DataFrame, sites: List[str],
+              train_sites: List[str]) -> None:
+    """
+    Standardizes codes on the training basins and writes them as ``context_<name>.pt``.
+
+    A basin without a code gets the training mean, so every bank covers the same basins and
+    comparisons stay on matched cohorts.
+    """
+    fitted = codes.loc[codes.index.intersection(train_sites)]
+    scaled = ((codes - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-8.0, 8.0)
+    scaled = scaled.reindex(sites).fillna(0.0)
+    torch.save({"site_ids": list(scaled.index),
+                "embeddings": torch.tensor(scaled.to_numpy(), dtype=torch.float32)},
+               os.path.join(arms_dir, "context_%s.pt" % name))
 
 
 def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: int = 32,
           dim: int = 64, depth: int = 2, hidden: int = 64, dropout: float = 0.1,
           n_read: int = 3, draws: int = 8, batch_size: int = 64, lr: float = 1e-3,
           weight_decay: float = 1e-4, aux_weight: float = 0.0, validation_fraction: float = 0.15,
-          read_passes: int = 6, device: str = "cpu", cache: Optional[Dict] = None,
-          early: Optional[pd.DataFrame] = None, verbose: bool = True) -> Dict:
+          read_passes: int = 6, device: str = "cpu", static_banks: Sequence[str] = (),
+          image_records: Optional[str] = None, modality_dropout: float = 0.3,
+          patch_size: int = 16, cache: Optional[Dict] = None,
+          early: Optional[pd.DataFrame] = None, statics: Optional[pd.DataFrame] = None,
+          images: Optional[Dict[str, np.ndarray]] = None, verbose: bool = True) -> Dict:
     """
-    Pretrains the code on the training basins and writes ``context_<name>.pt`` for all basins.
+    Pretrains the code on the training basins and writes its banks for all basins.
 
     :param arms_dir: Directory holding the daily cache and ``benchmark.pkl``; outputs go here.
     :type arms_dir: str
@@ -322,10 +521,22 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     :type validation_fraction: float
     :param read_passes: Groups of water years averaged into a basin's code.
     :type read_passes: int
+    :param static_banks: Banks in ``arms_dir`` read by the statics reader (none leaves it out).
+    :type static_banks: Sequence[str]
+    :param image_records: Root of the embedding records read by the image reader (None leaves
+        it out).
+    :type image_records: str, optional
+    :param modality_dropout: Chance that a reader is switched off for a training item (at least
+        one reader always stays on); only used with several readers.
+    :type modality_dropout: float
     :param cache: The daily cache, defaults to None (read from ``arms_dir``).
     :type cache: Dict, optional
     :param early: Pre-cutoff behaviour numbers, defaults to None (read from ``benchmark.pkl``).
     :type early: pd.DataFrame, optional
+    :param statics: Static description indexed by site id, defaults to None (``static_banks``).
+    :type statics: pd.DataFrame, optional
+    :param images: Site id -> standardized image, defaults to None (``image_records``).
+    :type images: Dict[str, np.ndarray], optional
     :return: The run summary, also written to ``reports/pretrain_<name>.json``.
     :rtype: Dict
     """
@@ -346,43 +557,104 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
             early = pd.read_pickle(os.path.join(arms_dir, "benchmark.pkl"))["early"]
         aux = standardized_aux(early, fit_sites).reindex(sites)
         aux_head = torch.nn.Linear(code_dim, len(AUX))
-    fit = WaterYearDataset(daily, fit_sites, n_read=n_read, draws=draws, seed=seed, aux=aux)
+    if statics is None and static_banks:
+        statics = load_static_banks(arms_dir, static_banks, train_sites)
+    if statics is not None:
+        statics = statics.reindex(sites).fillna(0.0).astype(np.float32)
+    if images is None and image_records:
+        with open(cache["manifest"]) as file:
+            states = {str(basin["site_id"]): str(basin.get("state", ""))
+                      for basin in json.load(file)["basins"]}
+        images = load_images(image_records, states, fit_sites)
+    if images is not None:
+        blank = np.zeros_like(next(iter(images.values())))       # the band means
+        images = {site: images.get(site, blank) for site in sites}
+    lasting = {"statics": statics, "images": images}
+    readers = ["history"] + [reader for reader, given in (("statics", statics), ("image", images))
+                             if given is not None]
+    subsets = reader_subsets(readers)
+
+    fit = WaterYearDataset(daily, fit_sites, n_read=n_read, draws=draws, seed=seed, aux=aux,
+                           augment=True, **lasting)
     validation = None
     if validation_sites:
         validation = WaterYearDataset(daily, validation_sites, n_read=n_read, draws=4, seed=seed,
-                                      fixed=True, aux=aux)
-    encoder, decoder = build_models(code_dim, dim, depth, hidden, dropout)
+                                      fixed=True, aux=aux, **lasting)
+    encoder, decoder = build_models(
+        code_dim, dim, depth, hidden, dropout, n_statics=0 if statics is None else statics.shape[1],
+        image_shape=None if images is None else blank.shape, patch_size=patch_size)
+    several = {}
+    if len(readers) > 1:
+        # The restored epoch is chosen on gauged and ungauged basins alike.
+        several = {"modality_dropout": modality_dropout,
+                   "validation_subsets": [list(subsets[""]), list(subsets["ungauged"])]}
     started = time.time()
     history = pretrain_behaviour(encoder, decoder, fit, epochs=epochs, batch_size=batch_size,
                                  lr=lr, weight_decay=weight_decay, device=device,
                                  validation_dataset=validation, aux_head=aux_head,
-                                 aux_weight=aux_weight, verbose=verbose)
+                                 aux_weight=aux_weight, verbose=verbose, **several)
     minutes = (time.time() - started) / 60.0
 
-    codes = write_codes(encoder, daily, sites, n_read, read_passes, batch_size, device)
-    read_sites = list(codes.index)
-    fitted = codes.loc[codes.index.intersection(train_sites)]
-    scaled = ((codes - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-8.0, 8.0)
-    # A basin without a usable water year gets the training mean, so every bank covers the same
-    # basins and comparisons stay on matched cohorts.
-    scaled = scaled.reindex(sites).fillna(0.0)
-    torch.save({"site_ids": list(scaled.index),
-                "embeddings": torch.tensor(scaled.to_numpy(), dtype=torch.float32)},
-               os.path.join(arms_dir, "context_%s.pt" % name))
+    banks, basins_with_code = [], 0
+    for suffix, members in subsets.items():
+        codes = write_codes(encoder, daily, sites, n_read, read_passes, batch_size, device,
+                            readers=members if len(readers) > 1 else None, **lasting)
+        basins_with_code = basins_with_code if suffix else len(codes)
+        banks.append(name + ("_" + suffix if suffix else ""))
+        save_bank(arms_dir, banks[-1], codes, sites, train_sites)
     torch.save({"encoder": encoder.state_dict(), "decoder": decoder.state_dict()},
                os.path.join(arms_dir, "behaviour_%s.pt" % name))
+    by_subset = None
+    if validation is not None and len(readers) > 1:
+        by_subset = validation_losses(encoder, decoder, validation, subsets, batch_size, device)
     summary = {"name": name, "seed": seed, "epochs": epochs, "code_dim": code_dim, "dim": dim,
                "depth": depth, "hidden": hidden, "dropout": dropout, "n_read": n_read,
                "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
-               "aux_weight": aux_weight, "fit_basins": len(fit.site_ids),
+               "aux_weight": aux_weight, "readers": readers, "banks": banks,
+               "static_banks": list(static_banks), "image_records": image_records,
+               "static_width": 0 if statics is None else int(statics.shape[1]),
+               "modality_dropout": modality_dropout if len(readers) > 1 else 0.0,
+               "fit_basins": len(fit.site_ids),
                "validation_basins": len(validation.site_ids) if validation else 0,
-               "basins_with_code": len(read_sites), "minutes": round(minutes, 2),
+               "basins_with_code": basins_with_code, "minutes": round(minutes, 2),
                "best_epoch": history.get("best_epoch", [epochs])[0],
-               "series_loss": history["series"], "validation_loss": history.get("validation")}
+               "validation_by_readers": by_subset,
+               "series_loss": history["series"], "validation_loss": history.get("validation"),
+               "validation_curves": {key.partition(":")[2]: values
+                                     for key, values in history.items()
+                                     if key.startswith("validation:")}}
     os.makedirs(os.path.join(arms_dir, "reports"), exist_ok=True)
     with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % name), "w") as file:
         json.dump(summary, file, indent=2)
     return summary
+
+
+def shuffle_bank(arms_dir: str, name: str, seed: int = 0,
+                 split: Optional[Dict[str, str]] = None) -> str:
+    """
+    Writes ``context_<name>_shuffled.pt``: the bank's codes handed to other basins of the same
+    split (the control that tells a real description from extra columns).
+
+    :param arms_dir: Directory of the context banks.
+    :type arms_dir: str
+    :param name: The bank to shuffle.
+    :type name: str
+    :param seed: Permutation seed.
+    :type seed: int
+    :param split: Site id -> split, defaults to None (read from ``manifest_none.json``).
+    :type split: Dict[str, str], optional
+    :return: The name of the shuffled bank.
+    :rtype: str
+    """
+    from experiments.catchment_foundation.prepare_context_ablation import shuffle_within_groups
+    if split is None:
+        with open(os.path.join(arms_dir, "manifest_none.json")) as file:
+            split = {str(basin["site_id"]): basin["split"] for basin in json.load(file)["basins"]}
+    bank = torch.load(os.path.join(arms_dir, "context_%s.pt" % name), weights_only=True)
+    source = shuffle_within_groups([split[str(site)] for site in bank["site_ids"]], seed)
+    torch.save({"site_ids": bank["site_ids"], "embeddings": bank["embeddings"][source]},
+               os.path.join(arms_dir, "context_%s_shuffled.pt" % name))
+    return name + "_shuffled"
 
 
 def main() -> None:
@@ -412,15 +684,30 @@ def main() -> None:
     trainer.add_argument("--validation-fraction", type=float, default=0.15)
     trainer.add_argument("--read-passes", type=int, default=6)
     trainer.add_argument("--device", default="cpu")
+    trainer.add_argument("--static-banks", nargs="*", default=[],
+                         help="banks read by the statics reader, e.g. statics location")
+    trainer.add_argument("--image-records", default=None,
+                         help="embedding records root (<root>/<state>/<site>.npz) for the image "
+                              "reader")
+    trainer.add_argument("--modality-dropout", type=float, default=0.3)
+    trainer.add_argument("--patch-size", type=int, default=16)
+    shuffler = commands.add_parser("shuffle", help="write a bank permuted within each split")
+    shuffler.add_argument("--arms-dir", required=True)
+    shuffler.add_argument("--name", required=True)
+    shuffler.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if args.command == "cache":
         manifest = args.manifest or os.path.join(args.arms_dir, "manifest_none.json")
         build_cache(manifest, args.arms_dir, args.workers)
         return
+    if args.command == "shuffle":
+        print("wrote context_%s.pt" % shuffle_bank(args.arms_dir, args.name, args.seed))
+        return
     options = {key: value for key, value in vars(args).items() if key != "command"}
     summary = train(**options)
     print(json.dumps({key: value for key, value in summary.items()
-                      if key not in ("series_loss", "validation_loss")}, indent=2))
+                      if key not in ("series_loss", "validation_loss", "validation_curves")},
+                     indent=2))
 
 
 if __name__ == "__main__":

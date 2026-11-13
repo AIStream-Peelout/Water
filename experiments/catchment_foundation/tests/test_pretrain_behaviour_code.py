@@ -1,4 +1,4 @@
-"""Tests for the behaviour-pretraining adapter: year selection, items, and held-out basins."""
+"""Tests for the behaviour-pretraining adapter: year selection, items, readers, held-out basins."""
 import importlib.util
 import os
 import tempfile
@@ -98,6 +98,105 @@ class TestWaterYearDataset(unittest.TestCase):
         self.assertTrue(np.isnan(aux.loc["b", "bfi"]))
 
 
+def write_bank(folder: str, name: str, sites: list, values: np.ndarray) -> None:
+    """Writes a context bank the way the baselines store one."""
+    torch.save({"site_ids": sites, "embeddings": torch.tensor(values, dtype=torch.float32)},
+               os.path.join(folder, "context_%s.pt" % name))
+
+
+class TestLastingInputs(unittest.TestCase):
+    """The static description and the reach image reach the readers as the baselines see them."""
+
+    def setUp(self):
+        self.daily = {"a": synthetic_daily(0.2, 1), "b": synthetic_daily(0.8, 2),
+                      "short": synthetic_daily(0.5, 3, start="2021-06-01")}
+        self.statics = pd.DataFrame({0: [1.0, 2.0, 3.0], 1: [0.5, -0.5, 0.0]},
+                                    index=["a", "b", "short"], dtype=np.float32)
+        rng = np.random.default_rng(0)
+        self.images = {site: rng.normal(size=(2, 8, 8)).astype(np.float32)
+                       for site in ("a", "b", "short")}
+
+    def test_static_banks_are_joined_and_constant_columns_dropped(self):
+        sites = ["a", "b", "held"]
+        with tempfile.TemporaryDirectory() as tmp:
+            write_bank(tmp, "statics", sites, np.array([[1.0, 0.0, 7.0], [2.0, 0.0, 7.0],
+                                                        [3.0, 0.0, 9.0]]))
+            write_bank(tmp, "location", sites, np.array([[0.1], [0.2], [0.3]]))
+            frame = pretrain.load_static_banks(tmp, ["statics", "location"], ["a", "b"])
+        # Padding is dropped by the bank loader; 7.0 does not vary over the training basins.
+        self.assertEqual(frame.shape, (3, 2))
+        np.testing.assert_allclose(frame.loc["held"].to_numpy(), [3.0, 0.3], rtol=1e-6)
+
+    def test_images_are_standardized_per_band_on_the_fitting_basins(self):
+        rng = np.random.default_rng(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "CO"))
+            for site, level in (("a", 1500.0), ("b", 2500.0), ("held", 9000.0)):
+                image = level + rng.normal(0.0, 100.0, (2, 8, 8)) * np.array([1.0, 3.0])[:, None, None]
+                np.savez(os.path.join(tmp, "CO", site + ".npz"), image=image.astype(np.float32))
+            images = pretrain.load_images(tmp, {"a": "CO", "b": "CO", "held": "CO", "gone": "CO"},
+                                          ["a", "b"])
+        self.assertEqual(sorted(images), ["a", "b", "held"])
+        fitted = np.stack([images["a"], images["b"]])
+        np.testing.assert_allclose(fitted.mean(axis=(0, 2, 3)), 0.0, atol=1e-4)
+        np.testing.assert_allclose(fitted.std(axis=(0, 2, 3)), 1.0, atol=1e-4)
+        # Reflectance is clipped at twice the scale before standardizing: each band is flat.
+        np.testing.assert_allclose(images["held"].std(axis=(1, 2)), 0.0, atol=1e-5)
+
+    def test_items_carry_both_inputs_and_only_training_images_are_turned(self):
+        fixed = pretrain.WaterYearDataset(self.daily, ["a", "b"], n_read=2, fixed=True,
+                                          statics=self.statics, images=self.images, augment=True)
+        item = fixed[1]
+        np.testing.assert_allclose(item["statics"].numpy(), [2.0, -0.5])
+        np.testing.assert_array_equal(item["image"].numpy(), self.images["b"])
+        turned = pretrain.WaterYearDataset(self.daily, ["a"], n_read=2, draws=12, seed=3,
+                                           statics=self.statics, images=self.images,
+                                           augment=True)
+        images = [turned[index]["image"].numpy() for index in range(12)]
+        self.assertTrue(any(not np.array_equal(image, self.images["a"]) for image in images))
+        for image in images:                                       # same pixels, moved
+            np.testing.assert_allclose(np.sort(image, axis=None),
+                                       np.sort(self.images["a"], axis=None))
+            np.testing.assert_allclose(image.mean(axis=(1, 2)), self.images["a"].mean(axis=(1, 2)),
+                                       atol=1e-6)
+
+    def test_codes_without_the_gauged_record_never_see_it(self):
+        reader = pretrain.ReadYearsDataset(self.daily, ["a", "short"], n_read=2,
+                                           statics=self.statics, images=self.images,
+                                           read_history=False)
+        self.assertEqual(reader.site_ids, ["a", "short"])           # no usable year needed
+        for index in range(2):
+            self.assertEqual(float(reader[index]["history"].abs().sum()), 0.0)
+        self.assertEqual(reader[1]["image"].shape, (2, 8, 8))
+        gauged = pretrain.ReadYearsDataset(self.daily, ["a", "short"], n_read=2,
+                                           statics=self.statics, images=self.images)
+        self.assertEqual(gauged.site_ids, ["a"])
+        self.assertGreater(float(gauged[0]["history"].abs().sum()), 0.0)
+
+    def test_banks_written_for_each_set_of_readers(self):
+        self.assertEqual(pretrain.reader_subsets(["history"]), {"": ("history",)})
+        self.assertEqual(pretrain.reader_subsets(["history", "statics"]),
+                         {"": ("history", "statics"), "gauge": ("history",),
+                          "ungauged": ("statics",)})
+        self.assertEqual(pretrain.reader_subsets(["history", "statics", "image"]),
+                         {"": ("history", "statics", "image"), "gauge": ("history",),
+                          "ungauged": ("statics", "image"), "statics": ("statics",),
+                          "image": ("image",)})
+
+    def test_shuffled_bank_hands_each_basin_another_code_of_its_split(self):
+        sites = ["t0", "t1", "t2", "h0", "h1"]
+        split = {site: "train" if site.startswith("t") else "holdout" for site in sites}
+        with tempfile.TemporaryDirectory() as tmp:
+            write_bank(tmp, "code", sites, np.arange(5.0)[:, None] + 1.0)
+            name = pretrain.shuffle_bank(tmp, "code", seed=0, split=split)
+            shuffled = tabular.load_bank(tmp, name)
+        self.assertEqual(name, "code_shuffled")
+        values = shuffled[0].to_dict()
+        self.assertEqual(sorted(values[site] for site in sites[:3]), [1.0, 2.0, 3.0])
+        self.assertEqual([values["h0"], values["h1"]], [5.0, 4.0])
+        self.assertTrue(all(values[site] != index + 1.0 for index, site in enumerate(sites)))
+
+
 @unittest.skipUnless(HAVE_FF, "needs Flow Forecast's behaviour_pretrain on the path")
 class TestTrain(unittest.TestCase):
     """The run trains on training basins only and writes a code for every basin."""
@@ -128,6 +227,47 @@ class TestTrain(unittest.TestCase):
         weights = np.linalg.lstsq(design, np.log(gains[:30]), rcond=None)[0]
         predicted = np.column_stack([bank.loc[held].to_numpy(), np.ones(len(held))]) @ weights
         self.assertGreater(np.corrcoef(predicted, np.log(gains[30:]))[0, 1], 0.8)
+
+    def test_several_readers_write_a_code_without_the_gauged_record(self):
+        rng = np.random.default_rng(1)
+        gains = np.exp(rng.uniform(np.log(0.05), np.log(2.0), 40))
+        daily = {"s%02d" % index: synthetic_daily(gain, index, start="2015-01-01")
+                 for index, gain in enumerate(gains)}
+        sites = list(daily)
+        split = {site: "holdout" if index >= 30 else "train" for index, site in enumerate(sites)}
+        early = pd.DataFrame({name: np.log(gains) for name in pretrain.AUX}, index=sites)
+        # The static description knows the wetness roughly; the image carries nothing.
+        wetness = (np.log(gains) - np.log(gains[:30]).mean()) / np.log(gains[:30]).std()
+        statics = pd.DataFrame({0: wetness + rng.normal(0.0, 0.1, 40), 1: rng.normal(size=40)},
+                               index=sites)
+        images = {site: rng.normal(size=(2, 16, 16)).astype(np.float32) for site in sites}
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = pretrain.train(tmp, "tiny", seed=0, epochs=14, code_dim=4, dim=16, depth=1,
+                                     hidden=16, dropout=0.0, n_read=2, draws=4, batch_size=16,
+                                     lr=3e-3, aux_weight=0.5, validation_fraction=0.2,
+                                     read_passes=2, modality_dropout=0.5, patch_size=8,
+                                     cache={"daily": daily, "split": split}, early=early,
+                                     statics=statics, images=images, verbose=False)
+            banks = {name: tabular.load_bank(tmp, name) for name in summary["banks"]}
+        self.assertEqual(summary["readers"], ["history", "statics", "image"])
+        self.assertEqual(sorted(banks), ["tiny", "tiny_gauge", "tiny_image", "tiny_statics",
+                                         "tiny_ungauged"])
+        self.assertEqual(sorted(summary["validation_by_readers"]),
+                         ["all", "gauge", "image", "statics", "ungauged"])
+        for bank in banks.values():
+            self.assertEqual(sorted(bank.index), sorted(sites))
+        held, fitted = sites[30:], sites[:30]
+
+        def held_out_correlation(bank: pd.DataFrame) -> float:
+            design = np.column_stack([bank.loc[fitted].to_numpy(), np.ones(len(fitted))])
+            weights = np.linalg.lstsq(design, np.log(gains[:30]), rcond=None)[0]
+            predicted = np.column_stack([bank.loc[held].to_numpy(), np.ones(len(held))]) @ weights
+            return float(np.corrcoef(predicted, np.log(gains[30:]))[0, 1])
+
+        # Without their gauged record, held-out basins are still ordered by wetness.
+        self.assertGreater(held_out_correlation(banks["tiny_ungauged"]), 0.8)
+        self.assertGreater(held_out_correlation(banks["tiny"]), 0.8)
+        self.assertFalse(np.allclose(banks["tiny"].to_numpy(), banks["tiny_ungauged"].to_numpy()))
 
 
 if __name__ == "__main__":
