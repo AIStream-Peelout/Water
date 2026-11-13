@@ -271,6 +271,8 @@ Readings:
    basins move from 0.530 to 0.512. Downstream the suite is unchanged within the seed spread
    (regime 0.63 to 0.67, donor flow 0.40 to 0.47, the rest within 0.01) and the forecast gain
    is no better (+3.6 / +4.4 / +7.5% against +5.8 / +6.3 / +8.6% for the same seed at 60).
+   *Corrected in §10: 2.7 times the basins do not lower this loss either. They improve the
+   code on floods and regime, not the reconstruction and not the forecast.*
 
 What this does not show: nothing about ungauged basins (this code reads the gauge), nothing
 about imagery, and nothing on fold 1.
@@ -411,3 +413,104 @@ the only lever that bears on both readers; (b) align the gauge code to forecasti
 which needs no new data; (c) catchment-wide inputs for the ungauged readers (land cover, dams,
 terrain over the basin and not a patch at the gauge), with the hand-built imagery numbers of
 reading 3 as the first check of any new image source.
+
+*§10 did (a) with the basins already on disk. It helped the gauge reader on the general tasks
+only and did nothing for the statics reader, so "the only lever that bears on both readers"
+was wrong.*
+
+## 10. Step 5, first part: more basins without a download (2026-11-13)
+
+**What was on disk.** The cohort of §7–§9 holds 533 basins because `basin_split_v1` took only
+gauges with a panel record, and a panel record needs GAGES-II attributes, a cloud-free Sentinel
+patch at the gauge and enough hourly coverage. Pretraining on the daily record needs none of
+the three. Of the 1,586 gauges scraped in six states, 1,244 pass the manifest's checks
+(drainage area, two years of flow before 2022, plausible runoff): 287 in Colorado, 281 in
+Florida, 279 in Pennsylvania, 191 in Oregon, 121 in Utah, 85 in Wyoming. Oregon was scraped in
+August and never used. The first part of step 5 therefore needed no download.
+
+**What was built.**
+
+- `build_basin_split.py --extend` and `splits/basin_split_v2.json`: v1 plus 689 gauges. No
+  site of v1 moves. A new gauge joins the fold its HUC6 group already has, so it never trains
+  next to a held-out neighbour; groups v1 never saw fill the lightest fold of their state. The
+  additions are 79 gauges in fold 0, 151 in fold 1 and 459 in folds 2 to 4.
+- `pretrain_behaviour_code.py pool`: the pre-2022 record of 598 extra basins (589 with two
+  usable water years, 420 of those in GAGES-II). Left out: the cohort's own basins, 89 gauges
+  whose HUC6 group holds a fold-0 site, and 24 tidal gauges (negative flow above 1%, the
+  cohort's rule). `train --with-pool` and `align --with-pool` add the pool to the fitting
+  basins and to nothing else.
+- For the statics reader the pool carries the `statics` and `location` numbers of its basins on
+  the cohort's scale; the cohort's rows are rebuilt alongside and must reproduce the banks on
+  disk.
+
+The comparison is matched by construction: the same 123 held-out basins, the same 60 validation
+basins, readouts and forecasters fitted on the same 403 basins as in §8 and §9. Only the basins
+the encoder is pretrained on change: 343 to 932 for the gauge reader, 343 to 763 for the
+statics reader. Pooled runs use 30 epochs (1.36 times the gradient steps of 60 epochs on 343
+basins). A wider model (reader and decoder width 128 for 64) was run with and without the pool
+to separate width from basin count. On CPU at 1.2 GB per run: 14 minutes per seed at width 64
+and 20 at width 128 with three runs at a time, 34 to 39 minutes when four ran at once.
+
+**Scores.** 123 held-out basins, targets from 2022 on, mean of three seeds. Forecast is the
+error cut against flow + weather + snow on 2023 onward, day 1–3 / 4–7 / 8–14. Validation is the
+flow-reconstruction loss on the 60 validation basins.
+
+| Description | Fitting basins | Forecast error cut | Flood size | Flood ÷ mean flow | Storm response | Low flow | Regime | Similar behaviour | Donor flow | Validation |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hand-built, gauged (18) | – | +7.5 / +8.3 / +9.8% | 0.87 | 0.87 | 0.91 | 0.87 | 0.77 | 0.76 | 0.39 | – |
+| Gauge code of §8 (width 64) | 343 | +5.3 / +6.5 / +8.4% | 0.74 | 0.69 | 0.82 | 0.87 | 0.65 | 0.62 | 0.43 | 0.48 |
+| Width 64, with pool | 932 | +4.3 / +7.3 / +8.5% | 0.80 | 0.70 | 0.85 | 0.87 | 0.68 | 0.61 | 0.44 | 0.49 |
+| Width 128 | 343 | +4.9 / +6.3 / +8.3% | 0.74 | 0.68 | 0.84 | 0.87 | 0.65 | 0.61 | 0.42 | 0.47 |
+| Width 128, with pool | 932 | +5.3 / +5.5 / +8.4% | 0.82 | 0.74 | 0.87 | 0.88 | 0.71 | 0.63 | 0.45 | 0.46 |
+| Physical statics (102) | – | +2.6 / +3.0 / +3.9% | 0.62 | 0.53 | 0.67 | 0.34 | 0.46 | 0.33 | 0.30 | – |
+| Statics + location (104) | – | +3.6 / +4.1 / +5.0% | 0.65 | 0.49 | 0.64 | 0.34 | 0.47 | 0.33 | 0.28 | – |
+| Statics code of §9 | 343 | +2.4 / +3.3 / +3.9% | 0.60 | 0.46 | 0.54 | 0.17 | 0.46 | 0.35 | 0.29 | 0.99 |
+| Statics code, with pool | 763 | +2.3 / +4.1 / +4.0% | 0.58 | 0.51 | 0.55 | 0.18 | 0.46 | 0.37 | 0.25 | 0.96 |
+
+Readings:
+
+1. **More basins improve the gauge code on the general tasks.** With the pool, flood size
+   rises by 0.06 at width 64 and by 0.08 at width 128, and the 95% interval of the per-basin
+   difference is above zero in all three seeds at both widths. Storm response rises by 0.03
+   and 0.02 (two of three seeds), regime by 0.02 and 0.06. Width without the pool changes
+   nothing. Width 128 with the pool is the best learned code on all seven tasks and halves the
+   gap to the hand-built numbers on flood size (0.13 to 0.06, inside the interval in every
+   seed), storm response (0.09 to 0.04) and regime (0.12 to 0.06). Flood ÷ mean flow and
+   similar behaviour stay 0.13 below.
+2. **The forecast gate does not move.** The four gauge codes are within noise of each other in
+   the tree forecaster: paired differences from −0.8 to +0.9 points, the interval excluding
+   zero in at most one seed. All four stay about 2 points below the hand-built numbers. Rule 2
+   is no closer.
+3. **The reconstruction loss on unseen basins hardly moves**: 0.48 to 0.49 at width 64, 0.47 to
+   0.46 at width 128. Per basin at width 64 the pooled code is better on 31 to 36 of the 60
+   validation basins and the median is 0.32 either way; five basins, mostly Florida canals,
+   hold 22 to 34% of the summed loss. §8 reading 5 concluded from the flat loss at 150 epochs
+   that the run was limited by the number of basins. That was an inference, not a test, and it
+   was wrong for this loss. What the extra basins improve is what the code says about floods
+   and regime, which a log-flow loss weights little.
+4. **The statics reader gains nothing from 2.2 times the basins.** Flow loss from its code
+   0.99 to 0.96 (the gauge code reaches 0.48). Paired with the §9 code: forecaster +0.1 / +0.7
+   / −0.5 points and no suite task outside the interval; against statics + location +0.3 / 0.0
+   / −1.0. The restored epochs are still early (10, 33 and 3). Rule 3 is still not met. The
+   limit is what the 104 numbers hold, not how many basins they are fitted on.
+5. **This is no case for a national download for pretraining.** 2.7 times the basins bought
+   0.03 to 0.08 on three suite tasks and nothing in forecasts or for ungauged basins.
+
+What this does not show:
+
+- The readouts and the forecaster were still fitted on 403 basins. Whether they improve with
+  more basins was not tested, and the earlier evidence for basin count came from there
+  (context began to transfer between 85 and 403 basins, `FORECAST_REVERIFICATION` §13–§14).
+- Pool basins get no code and are not scored. The 79 new fold-0 gauges of v2 are untouched and
+  would double the held-out set; nothing on fold 1.
+- The statics reader was fitted to the §8 gauge code, to isolate the effect of basins on it.
+  It has not been refitted to the width-128 pooled code.
+- 30 epochs with the pool; the width-128 pooled run of seed 2 was still improving at 30.
+- The pool includes 169 gauges outside GAGES-II (often regulated or urban); a pool of
+  reference-quality basins only was not tried.
+
+Next, in order of expected effect on forecasts: (a) fit the forecaster and the readouts on the
+larger basin set, scored on the same 123 held-out basins. Everything is on disk, but the
+forecaster table must be rebuilt for all basins: Pennsylvania's snow series were backfilled
+after the cohort's table was built, so every bar is re-based. (b) Align the gauge code to
+forecasting (rule 2). (c) Catchment-wide inputs for the ungauged readers.
