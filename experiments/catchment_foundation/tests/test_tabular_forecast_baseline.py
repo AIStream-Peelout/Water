@@ -75,12 +75,19 @@ class TestScore(unittest.TestCase):
         for band in tabular.BANDS:
             predictions[("flow+weather+snow", band)] = np.zeros(rows)       # persistence
             predictions[("flow", band)] = truth.copy()                       # perfect
+            predictions[("flow+weather+snow+some_bank", band)] = 0.5 * truth  # free-form arm
         report = tabular.score(data, predictions, "flow+weather+snow", n_boot=50)
         band = report["holdout"]["2023+"]["bands"]["day1-3"]
         self.assertAlmostEqual(band["flow+weather+snow"]["median_basin_skill_pct"], 0.0)
         self.assertAlmostEqual(band["flow"]["median_basin_skill_pct"], 100.0)
         self.assertEqual(band["flow"]["better_than_reference_pct"], 100.0)
         self.assertEqual(report["holdout"]["2023+"]["basins"], 2)
+        self.assertAlmostEqual(band["flow+weather+snow+some_bank"]["median_basin_skill_pct"], 75.0)
+        self.assertEqual(list(band), ["flow+weather+snow", "flow", "flow+weather+snow+some_bank"])
+
+    def test_an_arm_is_a_named_arm_or_any_joined_list_of_groups(self):
+        self.assertEqual(tabular.arm_groups("flow+weather"), ("flow", "weather"))
+        self.assertEqual(tabular.arm_groups("flow+snow+some_bank"), ("flow", "snow", "some_bank"))
 
 
 if __name__ == "__main__":

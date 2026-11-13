@@ -300,7 +300,7 @@ def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2
     :rtype: Dict
     """
     rng = np.random.default_rng(0)
-    arms = sorted({arm for arm, _ in predictions}, key=list(ARMS).index)
+    arms = list(dict.fromkeys(arm for arm, _ in predictions))     # in the order fitted
     report = {}
     for split in ("holdout", "train"):
         for period in ("2023+", "2022"):
