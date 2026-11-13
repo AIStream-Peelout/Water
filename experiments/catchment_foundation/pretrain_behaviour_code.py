@@ -37,7 +37,8 @@ if os.environ.get("FF_REPO"):
 
 CUTOFF = tabular.CUTOFF
 YEAR_DAYS, SPIN_UP_DAYS = 365, 90
-MIN_FLOW_DAYS = 300                   # valid flow days for a water year to be used
+MIN_FLOW_DAYS = 150                   # valid flow days for a water year to be used (seasonal
+#                                       gauges report about half of each year)
 FLOW_FLOOR_MM = 0.01                  # mm per day added before the logarithm
 AUX = ["log_runoff_mm", "log_runoff_ratio", "snow_fraction", "zero_flow_fraction", "log_aridity",
        "recession_rate", "storm_response", "rain_flow_coupling", "rb_flashiness", "bfi",
@@ -362,6 +363,9 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     read_sites = list(codes.index)
     fitted = codes.loc[codes.index.intersection(train_sites)]
     scaled = ((codes - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-8.0, 8.0)
+    # A basin without a usable water year gets the training mean, so every bank covers the same
+    # basins and comparisons stay on matched cohorts.
+    scaled = scaled.reindex(sites).fillna(0.0)
     torch.save({"site_ids": list(scaled.index),
                 "embeddings": torch.tensor(scaled.to_numpy(), dtype=torch.float32)},
                os.path.join(arms_dir, "context_%s.pt" % name))

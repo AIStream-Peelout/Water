@@ -33,7 +33,7 @@ class TestWaterYears(unittest.TestCase):
 
     def test_years_need_spin_up_full_length_and_flow(self):
         daily = synthetic_daily(0.5, 0)
-        daily.loc["2015-10-01":"2016-03-31", "q_mm"] = np.nan       # 183 days missing
+        daily.loc["2015-10-01":"2016-06-30", "q_mm"] = np.nan       # 91 days of flow left
         years = pretrain.water_years(daily)
         self.assertEqual(years[0], pd.Timestamp("2012-10-01"))     # spin-up from July 2012
         self.assertNotIn(pd.Timestamp("2015-10-01"), years)
