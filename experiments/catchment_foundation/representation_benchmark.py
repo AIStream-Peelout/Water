@@ -17,6 +17,10 @@ flow relates to weather; ``context_extremes.pt``: past flood and low-flow sizes;
 ``context_location.pt``); from the record after the cutoff it writes the targets
 (``benchmark.pkl``). ``run`` scores any ``+``-joined list of banks. ``recover`` asks how much of
 one description another can reproduce on held-out basins (the job of an ungauged student).
+``imagery`` writes hand-built numbers from each basin's satellite patches
+(``context_imagery_reach.pt``, ``context_imagery_regional.pt``): band means and spreads and the
+usual vegetation, water, moisture and snow indices. They show whether the patches hold anything
+a simple model can use before an image reader is trained on them.
 
 Example::
 
@@ -57,6 +61,14 @@ BEHAVIOUR = ["log_runoff_mm", "log_runoff_ratio", "recession_rate", "storm_respo
 SNOW_BELOW_C, WARM_ABOVE_C = 1.0, 2.0   # daily basin temperature: snow at or below, rain above
 REGIMES = ["intermittent", "snowmelt", "flashy", "steady", "mixed"]
 CONTEXT_WIDTH = 256                  # width of the context banks the forecasters read
+# Sentinel-2 bands of the patches in the embedding records: the 10 m reach patch at the gauge
+# and the 50 m regional patch around it.
+IMAGE_SOURCES = {"reach": ("{site}.npz", "image", ("B02", "B03", "B04", "B08")),
+                 "regional": ("{site}_regional.npz", "image_regional",
+                              ("B02", "B03", "B04", "B08", "B11", "B12"))}
+# Normalized differences (first minus second, over their sum).
+IMAGE_INDICES = {"ndvi": ("B08", "B04"), "ndwi": ("B03", "B08"), "ndmi": ("B08", "B11"),
+                 "ndsi": ("B03", "B11")}
 
 
 def rain_flow_lag(flow: np.ndarray, rain: np.ndarray, max_lag: int = 168) -> Tuple[float, float]:
@@ -239,6 +251,77 @@ def load_locations(gauges_root: str) -> pd.DataFrame:
               for path in sorted(glob.glob(os.path.join(gauges_root, "*", "gauges.csv")))]
     table = pd.concat(frames).drop_duplicates("site_no").set_index("site_no")
     return table[["dec_lat_va", "dec_long_va"]].astype(float)
+
+
+def image_statistics(image: np.ndarray, bands: Sequence[str]) -> Dict[str, float]:
+    """
+    Summarizes a satellite patch as hand-built numbers.
+
+    :param image: Patch of shape (bands, height, width) in digital numbers; a pixel that is zero
+        in every band lies outside the scene and is left out.
+    :type image: np.ndarray
+    :param bands: Sentinel-2 names of the bands, in order.
+    :type bands: Sequence[str]
+    :return: Mean and spread of every band and of every index of ``IMAGE_INDICES`` whose bands
+        are present, the share of open water (NDWI above 0) and, with band B11, of snow (NDSI
+        above 0.4). Empty when fewer than 16 pixels hold data.
+    :rtype: Dict[str, float]
+    """
+    valid = (image > 0).any(axis=0)
+    if valid.sum() < 16:
+        return {}
+    pixels = {band: image[position][valid].astype(np.float64)
+              for position, band in enumerate(bands)}
+    numbers = {}
+    for band, values in pixels.items():
+        numbers[band + "_mean"], numbers[band + "_std"] = values.mean(), values.std()
+    for name, (first, second) in IMAGE_INDICES.items():
+        if first in pixels and second in pixels:
+            index = (pixels[first] - pixels[second]) / np.maximum(pixels[first] + pixels[second],
+                                                                  1.0)
+            numbers[name + "_mean"], numbers[name + "_std"] = index.mean(), index.std()
+            if name == "ndwi":
+                numbers["water_share"] = (index > 0.0).mean()
+            if name == "ndsi":
+                numbers["snow_share"] = (index > 0.4).mean()
+    return {name: float(value) for name, value in numbers.items()}
+
+
+def build_imagery(manifest_path: str, arms_dir: str, records_root: str) -> Dict[str, int]:
+    """
+    Writes ``context_imagery_<source>.pt`` for the reach and the regional patch of every basin.
+
+    :param manifest_path: Manifest whose basins carry ``split`` and ``state``.
+    :type manifest_path: str
+    :param arms_dir: Directory of the context banks; outputs are written here.
+    :type arms_dir: str
+    :param records_root: Root of the embedding records (``<root>/<state>/<site>.npz`` and
+        ``<site>_regional.npz``).
+    :type records_root: str
+    :return: Source -> number of basins with a patch (the others get the training median).
+    :rtype: Dict[str, int]
+    """
+    from experiments.catchment_foundation.prepare_context_ablation import standardize_context
+    with open(manifest_path) as file:
+        basins = json.load(file)["basins"]
+    sites = [str(basin["site_id"]) for basin in basins]
+    train_rows = np.array([basin["split"] == "train" for basin in basins])
+    found = {}
+    for source, (pattern, key, bands) in IMAGE_SOURCES.items():
+        rows = {}
+        for basin in basins:
+            path = os.path.join(records_root, str(basin.get("state", "")),
+                                pattern.format(site=basin["site_id"]))
+            if os.path.exists(path):
+                with np.load(path) as record:
+                    rows[str(basin["site_id"])] = image_statistics(record[key], bands)
+        table = pd.DataFrame(rows).T.reindex(sites)
+        found[source] = int(table.notna().any(axis=1).sum())
+        _write_bank(arms_dir, "imagery_" + source, sites,
+                    standardize_context(table.to_numpy(dtype=float), train_rows, CONTEXT_WIDTH))
+        print("imagery_%s: %d numbers, %d of %d basins with a patch"
+              % (source, table.shape[1], found[source], len(sites)), flush=True)
+    return found
 
 
 def _write_bank(arms_dir: str, name: str, sites: List[str], matrix: np.ndarray) -> None:
@@ -638,6 +721,12 @@ def main() -> None:
     runner.add_argument("--also-pair", nargs="*", default=[],
                         help="Further representations every one is compared with")
     runner.add_argument("--output", default=None)
+    imager = commands.add_parser("imagery", help="write hand-built numbers of the satellite "
+                                                 "patches as banks")
+    imager.add_argument("--manifest", required=True)
+    imager.add_argument("--arms-dir", required=True)
+    imager.add_argument("--records-root", required=True,
+                        help="Embedding records root: <root>/<state>/<site>.npz")
     recoverer = commands.add_parser("recover", help="predict one description from others")
     recoverer.add_argument("--arms-dir", required=True)
     recoverer.add_argument("--from", dest="sources", nargs="+", required=True)
@@ -647,6 +736,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "build":
         build(args.manifest, args.arms_dir, args.gauges_root, args.workers)
+    elif args.command == "imagery":
+        build_imagery(args.manifest, args.arms_dir, args.records_root)
     elif args.command == "recover":
         recover(args.arms_dir, args.sources, args.targets, args.seed, args.output)
     else:

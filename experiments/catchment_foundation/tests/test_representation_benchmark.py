@@ -1,6 +1,7 @@
 """Tests for the representation benchmark's behaviour numbers, donor search and scoring."""
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -178,6 +179,48 @@ class TestScoring(unittest.TestCase):
             self.assertLess(paired["ci95"][1], 0.0, task)
             self.assertNotIn("paired", scores["good"][task])
         self.assertIn("Difference from good", printed.getvalue())
+
+
+class TestImagery(unittest.TestCase):
+    """Hand-built numbers of a satellite patch, and their banks."""
+
+    def test_indices_shares_and_pixels_outside_the_scene(self):
+        bands = ("B02", "B03", "B04", "B08", "B11", "B12")
+        image = np.zeros((6, 8, 8), dtype=np.float32)
+        image[:, :4, :4] = np.array([1000, 1000, 1000, 3000, 2000, 1500])[:, None, None]  # forest
+        image[:, :4, 4:] = np.array([1200, 1500, 1000, 500, 300, 200])[:, None, None]      # water
+        numbers = bench.image_statistics(image, bands)                # the lower half is no data
+        self.assertAlmostEqual(numbers["water_share"], 0.5)
+        self.assertAlmostEqual(numbers["snow_share"], 0.5)            # NDSI cannot tell them apart
+        self.assertAlmostEqual(numbers["ndvi_mean"], (0.5 + (500 - 1000) / 1500) / 2)
+        self.assertAlmostEqual(numbers["B08_mean"], 1750.0)
+        self.assertAlmostEqual(numbers["B08_std"], 1250.0)
+        reach = bench.image_statistics(image[:4], bands[:4])
+        self.assertNotIn("ndsi_mean", reach)                          # needs band B11
+        self.assertEqual(len(reach), 4 * 2 + 2 * 2 + 1)
+        self.assertEqual(bench.image_statistics(np.zeros((4, 8, 8)), bands[:4]), {})
+
+    def test_banks_are_standardized_on_training_basins_and_cover_every_basin(self):
+        rng = np.random.default_rng(0)
+        basins = [{"site_id": "s%d" % index, "state": "CO",
+                   "split": "holdout" if index == 3 else "train"} for index in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "records", "CO"))
+            for index, basin in enumerate(basins[:4]):               # s4 has no patch
+                level = 1000.0 * (index + 1)
+                np.savez(os.path.join(tmp, "records", "CO", basin["site_id"] + ".npz"),
+                         image=(level + rng.normal(0, 50, (4, 8, 8))).astype(np.float32))
+            manifest = os.path.join(tmp, "manifest.json")
+            with open(manifest, "w") as file:
+                json.dump({"basins": basins}, file)
+            found = bench.build_imagery(manifest, tmp, os.path.join(tmp, "records"))
+            reach = tabular.load_bank(tmp, "imagery_reach")
+        self.assertEqual(found, {"reach": 4, "regional": 0})
+        self.assertEqual(list(reach.index), ["s0", "s1", "s2", "s3", "s4"])
+        brightness = reach[0]                                        # mean of band B02
+        self.assertGreater(brightness["s3"], brightness["s2"])       # the held-out basin is brightest
+        self.assertAlmostEqual(float(brightness[["s0", "s1", "s2", "s4"]].mean()), 0.0, places=5)
+        self.assertAlmostEqual(float(brightness["s4"]), float(brightness["s1"]), places=1)  # median
 
 
 if __name__ == "__main__":
