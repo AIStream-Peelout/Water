@@ -160,6 +160,21 @@ Readings:
    ways: as the decoder's description, with the 18 numbers alongside, in pure simulation and
    in the GRU forecaster.
 
+### Does the gauge record hold more than the 18 numbers? (three seeds)
+
+A decoder whose code is written from the record and the 18 numbers together
+(`train --static-banks signatures response`, readers `history` + `statics`). Validation loss
+with both readers 0.465 / 0.470 / 0.415; with the 18 numbers alone in the same run
+0.496 / 0.496 / 0.431 (the stand-alone decoder on the 18 numbers: 0.506 / 0.493 / 0.425). In
+simulation the record takes off 4 to 6% of the loss the 18 numbers leave, in every seed.
+
+In the forecasts the same step is smaller than its intervals: the simulation with both
+against the simulation with the 18 numbers alone, +0.5 [0] / +0.7 [0] / +1.9 [1]; with the 18
+numbers also given as constants, +0.7 [0] / +0.5 [0] / +1.9 [1]. That last arm is the best one
+so far: +18.1 [3] / +16.7 [3] / +21.2 [3] against the reference, median skill
+52.5 / 56.4 / 67.7%. So there is a little in a long record beyond the hand-built numbers, and
+on long records it is too little to matter for these forecasts.
+
 ### Without any weather forecast (seed 0)
 
 Everything above gives the forecaster the weather that actually happened. The opposite bound
