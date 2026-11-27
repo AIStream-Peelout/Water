@@ -530,3 +530,63 @@ rain excluded) took 19 min for two epochs including 16–17 min of loading and e
 12 GB; a full run would be about an hour, one at a time. Running context arms on a forecaster
 that ignores the weather would repeat §10–§12; making it use the weather comes first, with the
 tree baseline's held-out skill (40 / 50 / 58%) as the mark to reach.
+
+## 15. Why the Crossformer ignored the weather (2026-11-27)
+
+§13 offered per-basin standardization as the reason; that was an artifact of a bug of mine
+(see the correction in §13). The actual cause is the training recipe. Everything here uses
+Flow Forecast's `CrossformerMultiBasin` unchanged, on the CO/UT cohort of §10–§13; scripts,
+cached windows and logs are in `calibration/crossformer_weather_2026-11-27/` (local only).
+
+**The archived model never fitted its own training data** (`probe_fit.py`, checkpoint
+`ctxf0x3_cf_none_s43`). On 6,000 training windows its loss is 9% below persistence (0.159
+against 0.174) and median basin skill is 3 / 8 / 10%. The run history says the same: training
+loss 0.130 after the first epoch and 0.123–0.131 for the next fifteen. A ridge regression on
+daily means of the very tensors the model receives (flow history, standardized weather; change
+targets clipped at ±3) reaches 3 / 7 / 12% on the held-out basins and its forecasts move by
+about 100% when the weather is swapped, so the signal is present in the inputs.
+
+**Its gradients were mostly noise.** 5% of training windows hold 59% of the Huber loss (the
+median window has 5% of the mean). At the batch size every archived run used (8), two batch
+gradients have a cosine of 0.03–0.04 and the mean gradient is 0.17–0.25 of the spread around
+it; at batch 64 the cosine is 0.14–0.21. All 26 archived Crossformer runs used batch 8, and 25
+of them learning rate 0.001, with no warm-up.
+
+**Changing only the step size or the batch makes it use the weather** (`train_probe.py`:
+32,768 cached training windows drawn uniformly, 6,000 steps unless noted; "weather swap" is the
+forecast change when all weather is exchanged between windows, as a share of the model's own
+departure from persistence, on the 53 held-out basins; skill is the median held-out basin's,
+hourly, days 1–3 / 4–7 / 8–14):
+
+| recipe | weather swap at the end (range over checkpoints) | held-out skill |
+|---|---|---|
+| batch 8, rate 0.001 (the archived recipe), seed 0 | 1% (0–20%) | 0.5 / 0.9 / 5.0% |
+| the same, seed 1 | 7% (0–7%) | −0.3 / 0.8 / 5.6% |
+| batch 8, rate 0.0001, seed 0 | 78% (60–78%) | −0.3 / 1.7 / 6.7% |
+| the same, seed 1 | 58% (54–74%) | −0.6 / −1.8 / 3.8% |
+| batch 8, rate 0.001 after a 1,000-step warm-up | 22% (13–79%) | −3.0 / 0.0 / 5.6% |
+| batch 64, rate 0.001, 4,000 steps | 38% (28–63%) | 0.1 / 0.5 / 11.0% |
+| batch 64, rate 0.0003, 7,000 steps | 74% (40–81%) | −0.1 / −0.9 / 1.4% |
+| batch 64, rate 0.001 with warm-up and cosine decay | 57% (26–62%) | 1.0 / 0.9 / −0.3% |
+
+With a synthetic target that is a known function of the cached rain (two linear stores), the
+archived recipe learns it poorly and unstably (weather swap 13–52% from one checkpoint to the
+next, skill 11 / 27 / 37%), and rate 0.0001 learns it steadily (weather swap 100%, skill
+63 / 69 / 67% and still improving). So the architecture can turn weather into flow; at rate
+0.001 and batch 8 the path through cross-dimension attention forms and is knocked out again.
+
+**Using the weather did not produce skill.** The longest stable run (batch 64, rate 0.0003)
+brought the loss on training windows 31% below persistence while the 2022 validation loss on
+the same basins stayed within 7% of persistence and held-out skill stayed near zero for days
+1–7. On 85 basins of hourly windows the model fits events it has seen and does not generalize,
+whatever the recipe. The trees get 32 / 37 / 35% on the same held-out basins.
+
+Readings:
+1. Every Crossformer result in §4–§13 came from a recipe in which the model could not learn to
+   use its weather inputs. The conclusions drawn from those runs about context (nothing static
+   can help this forecaster) describe that recipe, not the architecture.
+2. The fix is two existing options (`--batch-size 64 --lr 0.0003`, MPS for speed), but it buys
+   weather use, not skill. There is no case for more Crossformer runs on this cohort.
+3. The neural component that does generalize here is the daily decoder trained by behaviour
+   pretraining: as a pure simulator it reaches 31 / 40 / 52% skill on the five-state held-out
+   basins without being fitted to forecast anything (`notes/DECODER_SIMULATION_2026-11-27.md`).
