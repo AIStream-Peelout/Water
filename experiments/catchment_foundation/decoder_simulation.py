@@ -174,7 +174,8 @@ def load_run(arms_dir: str, run: str):
     :param run: Name of a ``train`` run (reads the gauge record) or an ``align`` run (reads the
         static description).
     :type run: str
-    :return: The reader, the decoder and the run's report.
+    :return: The reader, the decoder and the run's report. The decoder of a ``--blind`` run
+        comes back wrapped so that it ignores whatever code it is handed, as in its training.
     :rtype: Tuple[torch.nn.Module, torch.nn.Module, Dict]
     """
     with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % run)) as file:
@@ -191,6 +192,9 @@ def load_run(arms_dir: str, run: str):
         n_statics=0 if first_layer is None else first_layer.shape[1],
         gauged="history" in report["readers"])
     reader.load_state_dict(state["encoder"]), decoder.load_state_dict(state["decoder"])
+    if report.get("blind"):
+        # Its code weights were never trained: any code but zeros would be noise.
+        decoder = behaviour.CodeBlind(decoder)
     return reader.eval(), decoder.eval(), report
 
 
@@ -221,6 +225,9 @@ def basin_codes(arms_dir: str, reader: torch.nn.Module, report: Dict, which: str
     """
     if which not in CODES:
         raise ValueError("which must be one of %s but got %s" % (CODES, which))
+    if len(report["readers"]) > 1:
+        raise NotImplementedError("simulation is set up for runs with a single reader, not %s"
+                                  % report["readers"])
     cache = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))
     split = cache["split"]
     sites = list(split)
@@ -522,6 +529,28 @@ def feature_block(data: pd.DataFrame, arms_dir: str, label: str) -> np.ndarray:
             ratio = np.expm1(values[f"sim_dlog_{band}"].to_numpy(np.float64))
             block[rows, positions[f"sim_dq_{band}"]] = q0[rows] * ratio
     return block
+
+
+def temperature_offset_block(data: pd.DataFrame, arms_dir: str) -> np.ndarray:
+    """
+    The temperature correction from gauge to basin elevation (deg C), one column.
+
+    The decoder's temperature carries this correction and the tree forecaster's does not, so a
+    simulation arm knows the basin's elevation offset. This group gives the trees that number
+    alone, as the control for it.
+
+    :param data: Forecast table with ``site_id``.
+    :type data: pd.DataFrame
+    :param arms_dir: Cohort directory holding the pre-cutoff cache (which names the manifest).
+    :type arms_dir: str
+    :return: Array of shape (rows, 1).
+    :rtype: np.ndarray
+    """
+    manifest_path = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))["manifest"]
+    with open(manifest_path) as file:
+        offsets = {str(basin["site_id"]): float(basin.get("temp_offset_c") or 0.0)
+                   for basin in json.load(file)["basins"]}
+    return data["site_id"].map(offsets).to_numpy(np.float32)[:, None]
 
 
 def depth_block(data: pd.DataFrame, arms_dir: str) -> np.ndarray:
