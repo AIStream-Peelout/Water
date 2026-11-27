@@ -236,21 +236,41 @@ now left out.) Readings, on one seed:
 
 ## 7. Reviews
 
-An independent agent attacked the plan before any run, and Kimi K3.1 Pro (through OpenCode)
-reviewed the code afterwards. Neither found a path from observed flow after the issue day into
-a held-out feature. What they changed:
+Four outside reads, none by the author of the code: an independent agent attacked the plan
+before any run and hunted for leaks afterwards (46 checks on the cached data), and Kimi K3.1
+Pro and Gemini 4 Argon (through OpenCode) reviewed the code and then the results and the next
+plan. Their texts are in `calibration/embedding_forecast_2026-11-27/reviews/` (local).
 
+No reviewer found a path from observed flow after the issue day into a held-out feature. The
+leak hunt reproduced the seed-0 numbers and verified it by corruption tests (changing flow
+after a date leaves every earlier row bit-identical; changing weather beyond day 14 changes
+nothing; an unshifted simulation scores better than one shifted by a day either way).
+
+What they changed in the work:
 - The training-mean code was a strawman for "no basin knowledge" (a decoder never trained on
-  it); replaced by a decoder trained with no code.
-- Added the decoder conditioned on the 18 numbers, the other-state and nearest-basin codes,
-  the depth control and the no-flow table of §3.
-- Horizons crossing 1 October were read across a decoder restart; fixed with the 14-day
-  overrun.
-- Still open from the reviews: the simulations on the tree-fitting rows are in-sample for the
-  decoder and for the code (which has read the year it simulates). This cannot leak into
-  held-out scores but changes how much the trees trust each arm. The out-of-sample option
-  exists for this; its results are added below when in.
-- 375 tree-fitting rows have targets reaching into January 2022 (every arm alike).
+  it); replaced by a decoder trained with no code. Added the decoder conditioned on the 18
+  numbers, the other-state and nearest-basin codes, the depth and temperature-offset controls,
+  the no-flow table of §3, the per-region table and the no-weather-forecast test.
+- Bugs caught: horizons crossing 1 October were read across a decoder restart (fixed with the
+  14-day overrun); a no-code run's decoder would have been fed untrained code weights by the
+  out-of-sample path (fixed in `load_run`); three silent fallbacks made into errors; 375
+  tree-fitting rows had targets reaching into January 2022 (now left out).
+- The simulations on the tree-fitting rows were in-sample; the out-of-sample option was built
+  for it and showed no effect (§2).
+
+What they say the results do and do not show, and I agree:
+- **This is a gain from the decoder route, not yet from the embedding.** Nothing here shows
+  the learned code holds more than the 18 hand-built numbers: it ties them as the decoder's
+  description, in pure simulation and in the GRU forecaster, and loses to them as constants.
+- **The reference trees have a 30-day weather memory and band totals; the decoder has months
+  of daily weather.** Part of the simulation's gain is that memory (see the long-memory
+  control in §2 when in).
+- **It needs the horizon's weather** (§2, last table).
+- **Five regions and one fold that guided every choice.** Basin intervals are not
+  confirmation; the reserved fold is.
+- Not accepted: Argon's point that averaging simulated flows over stand-in years biases the
+  no-weather features. The target is a mean flow, so the mean of the simulated flows is the
+  quantity wanted.
 
 ## 8. Limits
 
