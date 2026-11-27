@@ -71,6 +71,42 @@ Readings:
    no-code simulation, mostly inside its intervals, and nothing once statics and location are
    also given to the trees. Borrowing the nearest gauged basin's code is no better.
 
+### By region
+
+Each state holds exactly one held-out river region, so the five columns are the five
+independent tests this split offers. Median basin error cut, each basin's three seeds averaged
+first (`by_state.py`); "pooled" is the cut in summed squared error over all 123 basins.
+
+| comparison, band | all | CO (38) | FL (30) | PA (28) | UT (16) | WY (11) | basins better | pooled |
+|---|---|---|---|---|---|---|---|---|
+| learned-code simulation against the reference, days 1-3 | +13.8% | +10.4% | +4.6% | +30.1% | +5.6% | +23.9% | 77% | +15.3% |
+| days 4-7 | +13.0% | +7.1% | +7.5% | +21.6% | +11.4% | +23.7% | 83% | +9.1% |
+| days 8-14 | +17.3% | +16.8% | +6.1% | +33.3% | +16.2% | +19.7% | 84% | +13.1% |
+| against the no-code simulation, days 1-3 | +6.8% | +6.7% | +4.8% | +11.2% | +4.9% | +23.0% | 67% | +5.3% |
+| days 4-7 | +8.1% | +12.9% | +4.5% | +7.0% | +11.8% | +18.9% | 76% | +5.3% |
+| days 8-14 | +9.9% | +13.3% | +4.3% | +12.2% | +9.9% | +13.4% | 81% | +7.3% |
+| against the 18 numbers as constants, days 1-3 | +6.9% | −2.9% | +3.9% | +23.7% | +3.9% | +23.4% | 63% | +7.1% |
+| days 4-7 | +4.1% | +2.6% | +1.9% | +12.9% | +1.1% | +19.7% | 67% | +1.5% |
+| days 8-14 | +9.2% | +8.7% | +2.9% | +20.2% | −5.3% | +13.8% | 71% | +5.4% |
+| against the decoder conditioned on the 18 numbers, days 1-3 | −0.5% | −3.1% | −5.0% | +0.7% | −0.8% | +12.0% | 48% | −2.3% |
+| days 4-7 | −0.7% | −5.8% | −2.7% | +0.1% | +2.7% | +17.6% | 47% | −1.1% |
+| days 8-14 | +0.6% | −3.3% | −0.4% | +2.4% | +0.6% | +17.2% | 54% | +1.7% |
+| statics-code simulation against the no-code simulation, days 1-3 | +2.4% | −3.5% | +0.1% | +9.5% | +4.6% | +7.3% | 57% | +3.3% |
+| days 4-7 | +2.2% | +2.5% | +0.4% | +4.5% | +4.6% | +11.0% | 59% | +1.8% |
+| days 8-14 | +4.0% | −0.5% | +2.6% | +8.8% | +3.3% | +13.7% | 57% | +1.3% |
+
+The gain over the reference and the gain over the no-code simulation are positive in all five
+regions and all three bands. The gain is largest in Pennsylvania and Wyoming and smallest in
+Florida. Against the 18 numbers as constants it holds in 13 of 15 region-band cells. The
+statics code's edge over no code is small everywhere and negative in Colorado.
+
+Checks the independent reviewer ran on seed 0 (its scripts, not rerun here): a reference
+given the decoder's daily weather for each of the 14 days gains +4.5 / +2.8 / +1.1%, so the
+simulation is not just finer weather; a per-basin seasonal climatology through the same
+feature code gives +2.4 / +2.1 / +5.5%; the change features alone, which never read observed
+flow, give +11.8 / +12.4 / +16.5%; and a simulation shifted by three days still gives
++7.5 / +14.1 / +14.2%, so much of the gain is the basin's slow state rather than storm timing.
+
 ## 3. Simulation alone, with no observed flow
 
 The same decoders as pure simulators on the held-out basins after 2022: weather in, flow out,
