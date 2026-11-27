@@ -150,7 +150,35 @@ Decoder validation loss (log flow, 60 validation basins, seeds 0 / 1 / 2): learn
 0.505 / 0.507 / 0.431, decoder on the 18 numbers 0.506 / 0.493 / 0.425, no code
 1.297 / 1.111 / 0.921.
 
-## 4. Why the earlier tests stalled
+## 4. A neural forecaster from the same parts (seed 0)
+
+`decoder_forecaster.py`: Flow Forecast's `DriverConditionedDecoder` (a GRU) reads 180 days of
+weather and observed flow up to the issue day, then the realized weather of the next 14 days,
+and writes the daily change in flow. A small reader turns a frozen per-basin description into
+the code it is conditioned on. It is trained with Flow Forecast's `pretrain_behaviour` loop on
+the trees' fitting rows (30 passes of 60,000 windows, 12 minutes on the Mac's GPU) and scored
+on the trees' rows with the trees' scoring. Held-out basins, 2023 and later:
+
+| forecaster | median skill | error cut against the tree reference | against the GRU with no description |
+|---|---|---|---|
+| trees, reference | 38.7 / 48.4 / 57.6% | | |
+| trees + learned-code simulation | 49.2 / 56.7 / 66.8% | +13.3 / +13.1 / +20.3% | +5.1 (+1, +8) / +4.0 (+1, +6) / +4.1 (+1, +8) |
+| trees + 18 numbers + learned-code simulation | 52.2 / 56.9 / 68.2% | +15.6 / +16.6 / +21.7% | +7.7 (+5, +11) / +6.0 (+3, +10) / +6.5 (+2, +11) |
+| GRU, no description | 41.7 / 53.7 / 64.7% | +11.7 (+3, +15) / +7.7 (+5, +12) / +13.7 (+9, +19) | |
+| GRU, learned code | 43.7 / 54.3 / 65.8% | +10.8 (+6, +19) / +12.9 (+9, +20) / +16.2 (+13, +22) | +4.7 (+3, +7) / +4.4 (+1, +7) / +2.0 (0, +5) |
+| GRU, 18 hand-built numbers | 48.2 / 56.3 / 67.7% | +12.9 (+9, +19) / +14.8 (+12, +20) / +20.5 (+15, +25) | +4.0 (0, +8) / +5.0 (+1, +7) / +5.6 (+2, +9) |
+
+(The reference differs slightly from §2 because fitting rows whose targets pass the cutoff are
+now left out.) Readings, on one seed:
+1. A plain GRU forecaster, with no description of the basin, already beats the tree reference
+   by 8 to 14% on basins it never saw. This is the neural forecaster the Crossformer was not.
+2. Given the learned code it improves a further 2 to 5% on held-out basins (4 to 6% on
+   trained-on ones, every interval above zero). This is the first neural forecaster here that
+   forecasts better on unseen basins because of the embedding.
+3. The hand-built numbers do as well as the learned code here too, and the GRU with them ties
+   the best tree arm with the simulation features.
+
+## 5. Why the earlier tests stalled
 
 - A static description competes with 30 days of the gauge's own flow for the same few points:
   even a private identifier per basin was worth only 6-12% on trained-on basins.
@@ -159,7 +187,7 @@ Decoder validation loss (log flow, 60 validation basins, seeds 0 / 1 / 2): learn
 - The neural forecaster the embedding was meant for was trained with a recipe under which it
   could not use its weather inputs (`FORECAST_REVERIFICATION_2026-11-10.md` §15).
 
-## 5. What was built
+## 6. What was built
 
 - `decoder_simulation.py`: `daily` caches whole daily records; `simulate` runs a run's decoder
   over every basin in water-year blocks (each also run 14 days past its end, so a horizon that
@@ -170,13 +198,12 @@ Decoder validation loss (log flow, 60 validation basins, seeds 0 / 1 / 2): learn
 - `pretrain_behaviour_code.py train`: `--blind` (the decoder never sees a code),
   `--no-gauge-record --static-banks signatures response` (a decoder conditioned on the 18
   numbers directly), `--leave-out-folds`.
-- `decoder_forecaster.py`: a GRU forecaster from the same Flow Forecast parts (results below
-  when in).
+- `decoder_forecaster.py`: the GRU forecaster of §4 (`train`, `compare`).
 - Features per issue day and lead band: simulated change in log flow; the same change in the
   forecaster's flow units; that ratio applied to the observed issue-day flow; and the observed
   minus simulated log flow on the issue day and over the week before.
 
-## 6. Reviews
+## 7. Reviews
 
 An independent agent attacked the plan before any run, and Kimi K3.1 Pro (through OpenCode)
 reviewed the code afterwards. Neither found a path from observed flow after the issue day into
@@ -194,7 +221,7 @@ a held-out feature. What they changed:
   exists for this; its results are added below when in.
 - 375 tree-fitting rows have targets reaching into January 2022 (every arm alike).
 
-## 7. Limits
+## 8. Limits
 
 - Five held-out regions, one per state: basin-bootstrap intervals overstate independence.
 - The weather of the horizon is the realized one, not a forecast.
@@ -204,7 +231,7 @@ a held-out feature. What they changed:
   A real ungauged application needs continuous forcing.
 - Everything is on fold 0, which has guided every design choice.
 
-## 8. Reproduction
+## 9. Reproduction
 
     python experiments/catchment_foundation/decoder_simulation.py daily --arms-dir <cohort>
     python -m experiments.catchment_foundation.pretrain_behaviour_code train --arms-dir <cohort> \
