@@ -405,5 +405,18 @@ class TestPool(unittest.TestCase):
             self.assertEqual(sorted(bank.index), sorted(cohort))
 
 
+class TestLeftOutBasins(unittest.TestCase):
+    def test_lists_the_basins_of_the_given_folds(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "manifest.json")
+            with open(path, "w") as file:
+                json.dump({"basins": [{"site_id": "a", "fold": 1}, {"site_id": "b", "fold": 2},
+                                      {"site_id": "c", "fold": 2}, {"site_id": "d"}]}, file)
+            self.assertEqual(pretrain.left_out_basins(path, [2]), {"b", "c"})
+            self.assertEqual(pretrain.left_out_basins(path, [1, 2]), {"a", "b", "c"})
+            self.assertEqual(pretrain.left_out_basins(path, []), set())
+
+
 if __name__ == "__main__":
     unittest.main()

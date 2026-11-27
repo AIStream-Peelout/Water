@@ -766,7 +766,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
           read_passes: int = 6, device: str = "cpu", static_banks: Sequence[str] = (),
           image_records: Optional[str] = None, modality_dropout: float = 0.3,
           patch_size: int = 16, with_pool: bool = False, gauged: bool = True,
-          blind: bool = False, cache: Optional[Dict] = None,
+          blind: bool = False, leave_out_folds: Sequence[int] = (),
+          cache: Optional[Dict] = None,
           early: Optional[pd.DataFrame] = None, statics: Optional[pd.DataFrame] = None,
           images: Optional[Dict[str, np.ndarray]] = None, pool: Optional[Dict] = None,
           verbose: bool = True) -> Dict:
@@ -776,6 +777,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     Two controls: with ``gauged`` off the code is read from the static banks alone, end to end
     (give the hand-built numbers as static banks for a decoder conditioned on them directly);
     with ``blind`` on the decoder never sees the code (:class:`CodeBlind`).
+    ``leave_out_folds`` keeps the basins of those manifest folds out of fitting and validation
+    (:func:`left_out_basins`); they still get a code.
 
     With a pool (:func:`build_pool`), its basins are added to the fitting basins and to nothing
     else: the validation basins, the basins that get a code and the scale of the banks are the
@@ -825,6 +828,9 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     daily, split = cache["daily"], cache["split"]
     sites = list(split)
     train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
+    left_out = left_out_basins(cache.get("manifest"), leave_out_folds)
+    fit_sites = [site for site in fit_sites if site not in left_out]
+    validation_sites = [site for site in validation_sites if site not in left_out]
     torch.manual_seed(seed)
     if pool is None and with_pool:
         pool = pd.read_pickle(os.path.join(arms_dir, POOL))
@@ -898,7 +904,8 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     summary = {"name": name, "seed": seed, "epochs": epochs, "code_dim": code_dim, "dim": dim,
                "depth": depth, "hidden": hidden, "dropout": dropout, "n_read": n_read,
                "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
-               "aux_weight": aux_weight, "readers": readers, "blind": blind, "banks": banks,
+               "aux_weight": aux_weight, "readers": readers, "blind": blind,
+               "leave_out_folds": list(leave_out_folds), "banks": banks,
                "static_banks": list(static_banks), "image_records": image_records,
                "static_width": 0 if statics is None else int(statics.shape[1]),
                "modality_dropout": modality_dropout if len(readers) > 1 else 0.0,
@@ -917,6 +924,27 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     with open(os.path.join(arms_dir, "reports", "pretrain_%s.json" % name), "w") as file:
         json.dump(summary, file, indent=2)
     return summary
+
+
+def left_out_basins(manifest_path: str, folds: Sequence[int]) -> set:
+    """
+    Lists the basins of the given manifest folds, to keep a run from fitting on them.
+
+    A run that leaves a fold out can then simulate that fold's basins as basins it never saw,
+    which is what a forecaster stacked on the simulation has to be fitted on.
+
+    :param manifest_path: Manifest whose basins carry ``fold``.
+    :type manifest_path: str
+    :param folds: Folds to leave out; empty for none.
+    :type folds: Sequence[int]
+    :return: The site ids of those folds.
+    :rtype: set
+    """
+    if not folds:
+        return set()
+    with open(manifest_path) as file:
+        return {str(basin["site_id"]) for basin in json.load(file)["basins"]
+                if basin.get("fold") in set(folds)}
 
 
 def split_basins(split: Dict[str, str], seed: int, validation_fraction: float
@@ -987,6 +1015,10 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     daily, split = cache["daily"], cache["split"]
     sites, seed, code_dim = list(split), taught["seed"], taught["code_dim"]
     train_sites, fit_sites, validation_sites = split_basins(split, seed, validation_fraction)
+    # A teacher that left folds out is followed: the new readers do not fit on them either.
+    left_out = left_out_basins(cache.get("manifest"), taught.get("leave_out_folds", ()))
+    fit_sites = [site for site in fit_sites if site not in left_out]
+    validation_sites = [site for site in validation_sites if site not in left_out]
     torch.manual_seed(seed)
     if pool is None and with_pool:
         pool = pd.read_pickle(os.path.join(arms_dir, POOL))
@@ -1066,6 +1098,7 @@ def align(arms_dir: str, name: str, teacher: str, epochs: int = 60, dim: int = 6
     summary = {"name": name, "teacher": teacher, "seed": seed, "epochs": epochs,
                "code_dim": code_dim, "dim": dim, "depth": depth, "dropout": dropout,
                "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
+               "leave_out_folds": list(taught.get("leave_out_folds", ())),
                "code_weight": code_weight, "readers": list(student.encoders),
                "banks": [name, name + "_transfer"], "static_banks": list(static_banks),
                "image_records": image_records, "fit_basins": len(fit.site_ids),
@@ -1161,6 +1194,8 @@ def main() -> None:
                          help="read the code from the static banks alone, end to end")
     trainer.add_argument("--blind", action="store_true",
                          help="control: the decoder never sees the code")
+    trainer.add_argument("--leave-out-folds", type=int, nargs="*", default=[],
+                         help="manifest folds kept out of fitting and validation")
     aligner = commands.add_parser("align", help="fit statics (and image) readers to the code "
                                                 "of a gauge-only run")
     aligner.add_argument("--arms-dir", required=True)

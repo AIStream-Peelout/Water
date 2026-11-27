@@ -110,8 +110,15 @@ def year_blocks(index: pd.DatetimeIndex) -> List[Tuple[int, int, int]]:
     return blocks
 
 
+def water_year_start(day: pd.Timestamp) -> pd.Timestamp:
+    """The 1 October that opens the water year a day belongs to."""
+    return pd.Timestamp(year=day.year if day.month >= 10 else day.year - 1, month=10, day=1)
+
+
 def simulate_basin(decoder: torch.nn.Module, daily: pd.DataFrame, code: torch.Tensor,
-                   batch_size: int = 64) -> Tuple[np.ndarray, np.ndarray]:
+                   batch_size: int = 64,
+                   year_codes: Optional[Dict[pd.Timestamp, torch.Tensor]] = None
+                   ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Runs the decoder over one basin's whole record.
 
@@ -127,6 +134,9 @@ def simulate_basin(decoder: torch.nn.Module, daily: pd.DataFrame, code: torch.Te
     :type code: torch.Tensor
     :param batch_size: Blocks per forward pass, defaults to 64.
     :type batch_size: int, optional
+    :param year_codes: Codes for single water years, keyed by their 1 October; a block whose
+        year is listed is run with that code instead of ``code``. Defaults to None.
+    :type year_codes: Dict[pd.Timestamp, torch.Tensor], optional
     :return: Simulated log flow in mm per day for every day (NaN before the first spin-up
         ends), and the overrun: on the first ``HORIZON_DAYS`` of a block, what the previous
         block's run says (NaN elsewhere).
@@ -145,7 +155,10 @@ def simulate_basin(decoder: torch.nn.Module, daily: pd.DataFrame, code: torch.Te
                 chunk = blocks[offset:offset + batch_size]
                 batch = torch.from_numpy(np.stack([drivers[begin:run_to]
                                                    for begin, _, _, run_to in chunk]))
-                output = decoder(batch, code.unsqueeze(0).expand(len(chunk), -1)).numpy()
+                codes = torch.stack([(year_codes or {}).get(
+                    water_year_start(daily.index[write_from]), code)
+                    for _, write_from, _, _ in chunk])
+                output = decoder(batch, codes).numpy()
                 for row, (begin, write_from, stop, run_to) in enumerate(chunk):
                     simulated[write_from:stop] = output[row, write_from - begin:stop - begin]
                     overrun[stop:run_to] = output[row, stop - begin:]
@@ -304,10 +317,72 @@ def shuffle_within_split(codes: pd.DataFrame, split: Dict[str, str], seed: int,
     return shuffled
 
 
+def other_year_codes(reader: torch.nn.Module, daily: Dict[str, pd.DataFrame], sites: List[str],
+                     n_read: int, passes: int = READ_PASSES, batch_size: int = 256
+                     ) -> Dict[str, Dict[pd.Timestamp, torch.Tensor]]:
+    """
+    Writes, for every water year of every basin, the code read from the basin's other years.
+
+    A code written from the whole record has read the flow of the year it is then used to
+    simulate. For a later year, which is what a forecast is issued in, it has not. These codes
+    put the earlier years on the same footing.
+
+    :param reader: A reader of the gauge record.
+    :type reader: torch.nn.Module
+    :param daily: Daily records before the cutoff, by site id.
+    :type daily: Dict[str, pd.DataFrame]
+    :param sites: The basins to write codes for.
+    :type sites: List[str]
+    :param n_read: Water years the reader sees at a time.
+    :type n_read: int
+    :param passes: Groups of years averaged per code, defaults to ``READ_PASSES``.
+    :type passes: int, optional
+    :param batch_size: Groups per forward pass, defaults to 256.
+    :type batch_size: int, optional
+    :return: Site id -> (1 October of a water year -> code). A basin with a single usable year
+        has no entry for it.
+    :rtype: Dict[str, Dict[pd.Timestamp, torch.Tensor]]
+    """
+    from flood_forecast.meta_models.behaviour_pretrain import encode_code
+    source = behaviour.WaterYearDataset(daily, [], n_read=n_read)
+    keys, groups = [], []
+    for site in sites:
+        if site not in daily:
+            continue
+        years = behaviour.water_years(daily[site])
+        members = {year: source.member(site, year) for year in years}
+        for year in years:
+            others = [other for other in years if other != year]
+            for group in range(passes if others else 0):
+                picked = [others[(group * n_read + step) % len(others)] for step in range(n_read)]
+                keys.append((site, year))
+                groups.append(np.stack([members[other] for other in picked]))
+    codes: Dict[str, Dict[pd.Timestamp, torch.Tensor]] = {}
+    reader.eval()
+    with torch.no_grad():
+        written = [encode_code(reader, {"history": torch.from_numpy(np.stack(groups[start:start + batch_size]))})
+                   for start in range(0, len(groups), batch_size)]
+    if written:
+        table = pd.DataFrame(torch.cat(written).numpy())
+        table["site"], table["year"] = [key[0] for key in keys], [key[1] for key in keys]
+        for (site, year), rows in table.groupby(["site", "year"]):
+            values = rows.drop(columns=["site", "year"]).to_numpy(np.float32).mean(axis=0)
+            codes.setdefault(site, {})[year] = torch.from_numpy(values)
+    return codes
+
+
 def simulate(arms_dir: str, run: str, which: str = "own", seed: int = 0,
-             daily: Optional[Dict[str, pd.DataFrame]] = None) -> str:
+             daily: Optional[Dict[str, pd.DataFrame]] = None,
+             out_of_sample: Optional[str] = None) -> str:
     """
     Simulates every basin's record with a run's decoder and writes ``sim_<label>.pkl``.
+
+    With ``out_of_sample`` the simulation of a basin never comes from a run fitted on it: a
+    basin of manifest fold k is simulated by the run named ``out_of_sample.format(fold=k)``
+    (trained with ``--leave-out-folds k``), and every other basin by ``run``. Codes read from
+    the gauge record are then also written, for each water year before the cutoff, from the
+    basin's other years (:func:`other_year_codes`). This is what a forecaster stacked on the
+    simulation should be fitted on; the label is ``<run>@oos``.
 
     :param arms_dir: Cohort directory.
     :type arms_dir: str
@@ -319,22 +394,42 @@ def simulate(arms_dir: str, run: str, which: str = "own", seed: int = 0,
     :type seed: int, optional
     :param daily: Whole daily records by site id; read from the cache when None.
     :type daily: Dict[str, pd.DataFrame], optional
-    :return: The label, ``<run>`` or ``<run>@<which>``.
+    :param out_of_sample: Name pattern, with ``{fold}``, of the runs that left each manifest
+        fold out. Defaults to None (every basin is simulated by ``run``).
+    :type out_of_sample: str, optional
+    :return: The label: ``<run>``, ``<run>@<which>`` or ``<run>@oos``.
     :rtype: str
     """
     if daily is None:
         daily = pd.read_pickle(os.path.join(arms_dir, DAILY))["daily"]
-    reader, decoder, report = load_run(arms_dir, run)
-    codes = basin_codes(arms_dir, reader, report, which, seed)
     started = time.time()
+    members = {run: None}                       # run name -> the basins it simulates (None: rest)
+    if out_of_sample:
+        if which != "own":
+            raise ValueError("out-of-sample simulation is defined for each basin's own code")
+        cache = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))
+        with open(cache["manifest"]) as file:
+            folds = {str(basin["site_id"]): basin.get("fold") for basin in json.load(file)["basins"]}
+        for fold in sorted({fold for site, fold in folds.items() if cache["split"][site] == "train"}):
+            members[out_of_sample.format(fold=fold)] = {site for site in folds if folds[site] == fold}
+    taken = set().union(*[sites for sites in members.values() if sites])
     simulated, overrun = {}, {}
-    for site in codes.index:
-        if site in daily:
+    for name, chosen in members.items():
+        reader, decoder, report = load_run(arms_dir, name)
+        codes = basin_codes(arms_dir, reader, report, which, seed)
+        wanted = [site for site in codes.index
+                  if site in daily and (site in chosen if chosen is not None else site not in taken)]
+        by_year = {}
+        if out_of_sample and "history" in report["readers"]:
+            early = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))["daily"]
+            by_year = other_year_codes(reader, early, wanted, report["n_read"])
+        for site in wanted:
             code = torch.tensor(codes.loc[site].to_numpy(dtype=np.float32))
-            series, beyond = simulate_basin(decoder, daily[site], code)
+            series, beyond = simulate_basin(decoder, daily[site], code,
+                                            year_codes=by_year.get(site))
             simulated[site] = pd.Series(series, index=daily[site].index)
             overrun[site] = pd.Series(beyond, index=daily[site].index)
-    label = run if which == "own" else "%s@%s" % (run, which)
+    label = run + "@oos" if out_of_sample else run if which == "own" else "%s@%s" % (run, which)
     pd.to_pickle({"sim": simulated, "overrun": overrun, "run": run, "codes": which,
                   "seed": seed}, os.path.join(arms_dir, "sim_%s.pkl" % label))
     print("simulated %d basins with %s in %.0f s"
@@ -462,6 +557,8 @@ def main() -> None:
     simulator.add_argument("--run", nargs="+", required=True, help="pretraining run name(s)")
     simulator.add_argument("--codes", nargs="+", choices=CODES, default=["own"])
     simulator.add_argument("--seed", type=int, default=0, help="seed of the shuffled codes")
+    simulator.add_argument("--out-of-sample", default=None,
+                           help="name pattern with {fold} of the runs that left each fold out")
     args = parser.parse_args()
     if args.command == "daily":
         build_daily(args.arms_dir, args.workers)
@@ -469,7 +566,7 @@ def main() -> None:
         daily = pd.read_pickle(os.path.join(args.arms_dir, DAILY))["daily"]
         for run in args.run:
             for which in args.codes:
-                simulate(args.arms_dir, run, which, args.seed, daily)
+                simulate(args.arms_dir, run, which, args.seed, daily, args.out_of_sample)
 
 
 if __name__ == "__main__":

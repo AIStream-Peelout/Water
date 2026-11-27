@@ -94,6 +94,23 @@ class TestSimulateBasin(unittest.TestCase):
                                    again[behaviour.SPIN_UP_DAYS:cut], atol=1e-6)
         self.assertGreater(np.abs(simulated[cut:] - again[cut:]).max(), 1e-4)
 
+    def test_a_water_year_can_be_run_with_its_own_code(self):
+        plain, _ = simulation.simulate_basin(self.decoder, self.daily, self.code)
+        year = pd.Timestamp("2016-10-01")
+        mixed, overrun = simulation.simulate_basin(self.decoder, self.daily, self.code,
+                                                   year_codes={year: -self.code})
+        other, _ = simulation.simulate_basin(self.decoder, self.daily, -self.code)
+        inside = (self.daily.index >= year) & (self.daily.index <= pd.Timestamp("2017-09-30"))
+        np.testing.assert_allclose(mixed[inside], other[inside], atol=1e-6)
+        outside = ~inside & np.isfinite(plain)
+        np.testing.assert_allclose(mixed[outside], plain[outside], atol=1e-6)
+        after = self.daily.index.get_loc(pd.Timestamp("2017-10-01"))
+        self.assertGreater(np.abs(overrun[after:after + 14] - plain[after:after + 14]).max(), 1e-4)
+
+    def test_water_year_start(self):
+        self.assertEqual(simulation.water_year_start(pd.Timestamp("2017-03-05")), pd.Timestamp("2016-10-01"))
+        self.assertEqual(simulation.water_year_start(pd.Timestamp("2017-10-01")), pd.Timestamp("2017-10-01"))
+
     def test_another_code_gives_another_series(self):
         first, _ = simulation.simulate_basin(self.decoder, self.daily, self.code)
         second, _ = simulation.simulate_basin(self.decoder, self.daily, -self.code)
@@ -171,6 +188,24 @@ class TestFeatures(unittest.TestCase):
                                3.0 * 0.2, places=4)
         self.assertAlmostEqual(float(block[2, simulation.FEATURES.index("sim_dlog_day1-3")]),
                                np.log(22.0 / 20.0), places=5)
+
+
+class TestOtherYearCodes(unittest.TestCase):
+    def test_a_years_code_does_not_depend_on_that_years_flow(self):
+        torch.manual_seed(0)
+        reader, _ = behaviour.build_models(code_dim=4, dim=16, depth=1, hidden=8, dropout=0.0)
+        daily = {"a": record("2010-01-01", "2016-12-31", seed=1)}
+        years = behaviour.water_years(daily["a"])
+        self.assertGreaterEqual(len(years), 4)
+        codes = simulation.other_year_codes(reader, daily, ["a", "missing"], n_read=3, passes=2)
+        self.assertEqual(sorted(codes["a"]), years)
+        changed = {"a": daily["a"].copy()}
+        year = years[2]
+        inside = (changed["a"].index >= year) & (changed["a"].index < year + pd.Timedelta(days=365))
+        changed["a"].loc[inside, "q_mm"] *= 7.0
+        again = simulation.other_year_codes(reader, changed, ["a"], n_read=3, passes=2)
+        np.testing.assert_allclose(codes["a"][year].numpy(), again["a"][year].numpy(), atol=1e-6)
+        self.assertGreater(float((codes["a"][years[0]] - again["a"][years[0]]).abs().max()), 1e-5)
 
 
 class TestOtherCodes(unittest.TestCase):
