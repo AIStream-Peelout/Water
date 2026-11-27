@@ -110,6 +110,27 @@ class TestScore(unittest.TestCase):
         self.assertEqual(band["most"]["error_cut_ci95"],
                          plain["holdout"]["2023+"]["bands"]["day4-7"]["most"]["error_cut_ci95"])
 
+    def test_standardized_weather_is_defined_for_held_out_basins(self):
+        """Held-out basins must get their own weather statistics, not missing values."""
+        dates = pd.date_range("2021-01-01", "2023-06-30", freq="7D")
+        rng = np.random.default_rng(0)
+        frames = []
+        for site, split, level in (("a", "train", 0.0), ("b", "holdout", 50.0)):
+            frame = pd.DataFrame(rng.normal(level, 2.0, (len(dates), len(tabular.WEATHER))),
+                                 columns=tabular.WEATHER)
+            frame["date"], frame["site_id"], frame["split"] = dates, site, split
+            frame["period"] = np.where(dates < pd.Timestamp(tabular.CUTOFF), "fit", "2023+")
+            frames.append(frame)
+        data = pd.concat(frames, ignore_index=True)
+        fit_rows = ((data.period == "fit") & (data.split == "train")).to_numpy()
+        block, _ = tabular.features(data, ("weather_z",), "", fit_rows)
+        self.assertTrue(np.isfinite(block).all())
+        settled = (data.date < pd.Timestamp(tabular.CUTOFF) - pd.Timedelta(days=14)).to_numpy()
+        for site in ("a", "b"):
+            own = block[settled & (data.site_id == site).to_numpy()]
+            np.testing.assert_allclose(own.mean(axis=0), 0.0, atol=1e-5)
+            np.testing.assert_allclose(own.std(axis=0, ddof=1), 1.0, atol=1e-5)
+
     def test_an_arm_is_a_named_arm_or_any_joined_list_of_groups(self):
         self.assertEqual(tabular.arm_groups("flow+weather"), ("flow", "weather"))
         self.assertEqual(tabular.arm_groups("flow+snow+some_bank"), ("flow", "snow", "some_bank"))

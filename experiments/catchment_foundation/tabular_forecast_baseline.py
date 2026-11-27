@@ -30,6 +30,7 @@ year after the cutoff and for the years after that.
 import argparse
 import json
 import os
+import sys
 import time
 from typing import Dict, List, Optional, Sequence
 
@@ -260,11 +261,26 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
         elif group == "weather_z":
             # What the neural forecasters see: each basin's weather standardized on its own
             # pre-cutoff statistics, which hides absolute levels such as the freezing point.
-            stats = data[fit_rows].groupby("site_id")[WEATHER].agg(["mean", "std"])
+            # Every basin has such statistics, held-out ones included (they need no flow), so
+            # they are taken from all basins' rows whose horizon ends before the cutoff.
+            settled = pd.to_datetime(data["date"]) < (
+                pd.Timestamp(CUTOFF) - pd.Timedelta(days=max(last for _, last in BANDS.values())))
+            stats = data[settled.to_numpy()].groupby("site_id")[WEATHER].agg(["mean", "std"])
             mean = stats.xs("mean", axis=1, level=1).reindex(data.site_id).to_numpy()
             std = stats.xs("std", axis=1, level=1).reindex(data.site_id).to_numpy()
             block = ((data[WEATHER].to_numpy() - mean) / np.where(std > 0, std, 1.0))
             block = block.astype(np.float32)
+        elif group.startswith("sim:") or group == "depth":
+            # Simulated flow from a pretrained decoder, or the issue-day flow as a depth
+            # (decoder_simulation.py); imported here because that module builds on this one.
+            root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            from experiments.catchment_foundation import decoder_simulation
+            if group == "depth":
+                block = decoder_simulation.depth_block(data, arms_dir)
+            else:
+                block = decoder_simulation.feature_block(data, arms_dir, group[4:])
         elif group == "basin_id":
             fitted = sorted(set(data.loc[fit_rows, "site_id"]))
             codes = data.site_id.map({site: i for i, site in enumerate(fitted)})
