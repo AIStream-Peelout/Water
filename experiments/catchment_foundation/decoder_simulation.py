@@ -49,6 +49,8 @@ HORIZON_DAYS = max(last for _, last in tabular.BANDS.values())
 FEATURES = [f"sim_{kind}_{band}" for kind in ("dlog", "add", "dq") for band in tabular.BANDS]
 FEATURES += ["sim_err0", "sim_err7"]
 MEMBER_YEARS = 10                     # other years whose weather stands in for an unknown horizon
+LONG_WEATHER = ["rain_90", "rain_180", "demand_90", "demand_180", "warmth_90", "frost_180",
+                "snowfall_180", "thaw_30"]
 
 
 def whole_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame]]:
@@ -724,6 +726,46 @@ def temperature_offset_block(data: pd.DataFrame, arms_dir: str) -> np.ndarray:
         offsets = {str(basin["site_id"]): float(basin.get("temp_offset_c") or 0.0)
                    for basin in json.load(file)["basins"]}
     return data["site_id"].map(offsets).to_numpy(np.float32)[:, None]
+
+
+def long_weather_block(data: pd.DataFrame, arms_dir: str) -> np.ndarray:
+    """
+    Weather totals over the three and six months before the issue day, eight columns.
+
+    The tree forecaster's own weather features reach back 30 days; the decoder integrates
+    months of weather. This group gives the trees that memory directly (rain and evaporation
+    demand over 90 and 180 days, mean temperature over 90, frost and snowfall over 180, thaw
+    over 30), as the control for how much of a simulation arm's gain is just longer memory.
+    Temperatures carry the correction to basin elevation, as the decoder's do.
+
+    :param data: Forecast table with ``site_id`` and ``date``.
+    :type data: pd.DataFrame
+    :param arms_dir: Cohort directory holding the daily cache.
+    :type arms_dir: str
+    :return: Array of shape (rows, len(LONG_WEATHER)), NaN where too little weather is known.
+    :rtype: np.ndarray
+    """
+    cache = _daily_cache(arms_dir)
+    block = np.full((len(data), len(LONG_WEATHER)), np.nan, dtype=np.float32)
+    dates = pd.to_datetime(data["date"]).to_numpy()
+    for site, rows in data.groupby("site_id", sort=False).indices.items():
+        if site not in cache["daily"]:
+            continue
+        daily = cache["daily"][site]
+        rain, warmth, demand = daily.p.clip(lower=0), daily.t, daily.pet.clip(lower=0)
+
+        def total(series: pd.Series, days: int) -> pd.Series:
+            return series.rolling(days, min_periods=int(0.6 * days)).mean() * days
+
+        frame = pd.DataFrame({
+            "rain_90": total(rain, 90), "rain_180": total(rain, 180),
+            "demand_90": total(demand, 90), "demand_180": total(demand, 180),
+            "warmth_90": warmth.rolling(90, min_periods=54).mean(),
+            "frost_180": total((-warmth).clip(lower=0), 180),
+            "snowfall_180": total(rain.where(warmth < 0, 0.0).where(warmth.notna()), 180),
+            "thaw_30": total(warmth.clip(lower=0), 30)})
+        block[rows] = frame[LONG_WEATHER].reindex(dates[rows]).to_numpy(np.float32)
+    return block
 
 
 def depth_block(data: pd.DataFrame, arms_dir: str) -> np.ndarray:

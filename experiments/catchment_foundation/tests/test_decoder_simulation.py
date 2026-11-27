@@ -210,6 +210,25 @@ class TestFeatures(unittest.TestCase):
         early = restart - 20                               # horizon ends before the restart
         self.assertAlmostEqual(float(steady["sim_dlog_day8-14"].iloc[early]), 0.0, places=6)
 
+    def test_long_weather_sums_the_months_before_the_issue_day(self):
+        index = pd.date_range("2020-01-01", periods=400, freq="1D")
+        daily = pd.DataFrame({"q_mm": 1.0, "p": 2.0, "pet": 1.0,
+                              "t": np.where(np.arange(400) < 300, -4.0, 6.0)}, index=index)
+        with tempfile.TemporaryDirectory() as arms_dir:
+            pd.to_pickle({"daily": {"a": daily}, "scale": {"a": 1.0}},
+                         os.path.join(arms_dir, simulation.DAILY))
+            simulation._daily_cache.cache_clear()
+            data = pd.DataFrame({"site_id": ["a", "a", "a"], "date": [index[299], index[399], index[20]]})
+            block = simulation.long_weather_block(data, arms_dir)
+        column = {name: position for position, name in enumerate(simulation.LONG_WEATHER)}
+        self.assertAlmostEqual(float(block[0, column["rain_90"]]), 180.0, places=3)
+        self.assertAlmostEqual(float(block[0, column["snowfall_180"]]), 360.0, places=3)
+        self.assertAlmostEqual(float(block[0, column["frost_180"]]), 720.0, places=3)
+        self.assertAlmostEqual(float(block[0, column["thaw_30"]]), 0.0, places=3)
+        self.assertAlmostEqual(float(block[1, column["thaw_30"]]), 180.0, places=3)
+        self.assertAlmostEqual(float(block[1, column["snowfall_180"]]), 160.0, places=3)
+        self.assertTrue(np.isnan(block[2, column["rain_90"]]))        # too little weather yet
+
     def test_depth_is_the_log_of_the_issue_day_flow(self):
         index = pd.date_range("2020-01-01", periods=10, freq="1D")
         daily = pd.DataFrame({"q_mm": np.arange(1.0, 11.0)}, index=index)

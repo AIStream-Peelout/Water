@@ -271,7 +271,8 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
         elif group == "weather_past":
             # Only what is known on the issue day: no weather of the horizon.
             block = data[[name for name in WEATHER if "_prev" in name]].to_numpy(np.float32)
-        elif group.startswith(("sim:", "simesp:")) or group in ("depth", "temperature_offset"):
+        elif group.startswith(("sim:", "simesp:")) or group in ("depth", "temperature_offset",
+                                                                "weather_long"):
             # Simulated flow from a pretrained decoder, or the issue-day flow as a depth
             # (decoder_simulation.py); imported here because that module builds on this one.
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -282,6 +283,8 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
                 block = decoder_simulation.depth_block(data, arms_dir)
             elif group == "temperature_offset":
                 block = decoder_simulation.temperature_offset_block(data, arms_dir)
+            elif group == "weather_long":
+                block = decoder_simulation.long_weather_block(data, arms_dir)
             elif group.startswith("simesp:"):
                 block = decoder_simulation.unknown_weather_block(data, arms_dir, group[7:])
             else:
