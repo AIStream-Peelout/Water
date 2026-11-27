@@ -223,5 +223,47 @@ class TestImagery(unittest.TestCase):
         self.assertAlmostEqual(float(brightness["s4"]), float(brightness["s1"]), places=1)  # median
 
 
+class TestClimateIndices(unittest.TestCase):
+    def test_indices_follow_from_the_weather(self):
+        index = pd.date_range("2018-01-01", "2019-12-31", freq="1D")
+        winter = index.month.isin([12, 1, 2])
+        daily = pd.DataFrame({"p": np.where(winter, 4.0, 1.0), "t": np.where(winter, -5.0, 15.0),
+                              "pet": 2.0, "q_mm": np.nan}, index=index)
+        found = bench.climate_indices(daily)
+        self.assertEqual(sorted(found), sorted(bench.CLIMATE))
+        rain = daily.p.mean()
+        self.assertAlmostEqual(found["snow_share"], daily.p[winter].sum() / daily.p.sum(), places=6)
+        self.assertAlmostEqual(found["log_aridity"], np.log(2.01 / (rain + 0.01)), places=6)
+        self.assertAlmostEqual(found["dry_days"], 0.0, places=6)
+        self.assertLess(found["rain_with_warmth"], -0.9)          # it rains when it is cold
+
+    def test_flow_is_never_read_and_short_records_give_nothing(self):
+        index = pd.date_range("2018-01-01", "2019-12-31", freq="1D")
+        rng = np.random.default_rng(0)
+        daily = pd.DataFrame({"p": rng.gamma(0.5, 4.0, len(index)), "t": rng.normal(8, 6, len(index)),
+                              "pet": rng.gamma(2.0, 1.0, len(index)), "q_mm": 1.0}, index=index)
+        other = daily.assign(q_mm=daily.q_mm * 50.0)
+        self.assertEqual(bench.climate_indices(daily), bench.climate_indices(other))
+        self.assertTrue(all(np.isnan(value) for value in bench.climate_indices(daily.iloc[:100]).values()))
+
+    def test_bank_is_standardized_on_the_training_basins(self):
+        index = pd.date_range("2018-01-01", "2019-12-31", freq="1D")
+        rng = np.random.default_rng(1)
+        daily = {site: pd.DataFrame({"p": rng.gamma(0.5, 2.0 + i, len(index)), "t": rng.normal(5 + i, 6, len(index)),
+                                     "pet": rng.gamma(2.0, 1.0, len(index))}, index=index)
+                 for i, site in enumerate(["a", "b", "c", "d"])}
+        daily["e"] = daily["a"].iloc[:50]
+        split = {"a": "train", "b": "train", "c": "train", "d": "holdout", "e": "holdout"}
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "daily.pkl")
+            pd.to_pickle({"daily": daily, "split": split}, path)
+            self.assertEqual(bench.build_climate(folder, path), 4)
+            bank = torch.load(os.path.join(folder, "context_climate.pt"), weights_only=True)
+        self.assertEqual(bank["site_ids"], list(split))
+        values = bank["embeddings"].numpy()
+        np.testing.assert_allclose(values[:3].mean(axis=0), 0.0, atol=1e-5)
+        np.testing.assert_array_equal(values[4], 0.0)             # too little weather: the mean
+
+
 if __name__ == "__main__":
     unittest.main()

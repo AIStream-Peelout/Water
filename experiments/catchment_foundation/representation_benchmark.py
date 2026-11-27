@@ -60,6 +60,9 @@ BEHAVIOUR = ["log_runoff_mm", "log_runoff_ratio", "recession_rate", "storm_respo
              "low_flow"]
 SNOW_BELOW_C, WARM_ABOVE_C = 1.0, 2.0   # daily basin temperature: snow at or below, rain above
 REGIMES = ["intermittent", "snowmelt", "flashy", "steady", "mixed"]
+CLIMATE = ["log_rain", "log_evaporation", "log_aridity", "temperature", "temperature_swing",
+           "snow_share", "rain_season_cos", "rain_season_sin", "heavy_rain_days", "dry_days",
+           "rain_with_warmth"]
 CONTEXT_WIDTH = 256                  # width of the context banks the forecasters read
 # Sentinel-2 bands of the patches in the embedding records: the 10 m reach patch at the gauge
 # and the 50 m regional patch around it.
@@ -353,6 +356,68 @@ def build_imagery(manifest_path: str, arms_dir: str, records_root: str) -> Dict[
         print("imagery_%s: %d numbers, %d of %d basins with a patch"
               % (source, table.shape[1], found[source], len(sites)), flush=True)
     return found
+
+
+def climate_indices(daily: pd.DataFrame, min_days: int = 365) -> Dict[str, float]:
+    """
+    Describes a basin's climate from its weather alone: no flow is read.
+
+    These are the numbers a basin without a gauge still has. They are computed over the days
+    with weather, so for a gauge whose file lacks winter weather they describe its open season.
+
+    :param daily: Daily frame with ``p`` and ``pet`` (mm per day) and ``t`` (deg C).
+    :type daily: pd.DataFrame
+    :param min_days: Days of weather needed, defaults to 365.
+    :type min_days: int, optional
+    :return: The ``CLIMATE`` numbers, or NaN for each when there is too little weather.
+    :rtype: Dict[str, float]
+    """
+    frame = daily[["p", "t", "pet"]].dropna()
+    if len(frame) < min_days or frame.p.sum() <= 0:
+        return {name: float("nan") for name in CLIMATE}
+    rain, warmth, demand = frame.p.clip(lower=0), frame.t, frame.pet.clip(lower=0)
+    monthly_rain = rain.groupby(frame.index.month).mean().reindex(range(1, 13))
+    monthly_warmth = warmth.groupby(frame.index.month).mean().reindex(range(1, 13))
+    angle = 2.0 * np.pi * (np.arange(12) + 0.5) / 12.0
+    relative = (monthly_rain / monthly_rain.mean()).to_numpy()
+    both = monthly_rain.notna() & monthly_warmth.notna()
+    together = np.corrcoef(monthly_rain[both], monthly_warmth[both])[0, 1] if both.sum() > 2 else 0.0
+    return {
+        "log_rain": float(np.log(rain.mean() + 0.01)),
+        "log_evaporation": float(np.log(demand.mean() + 0.01)),
+        "log_aridity": float(np.log((demand.mean() + 0.01) / (rain.mean() + 0.01))),
+        "temperature": float(warmth.mean() / 10.0),
+        "temperature_swing": float(np.nanstd(monthly_warmth.to_numpy()) / 10.0),
+        "snow_share": float(rain[warmth < 0].sum() / rain.sum()),
+        "rain_season_cos": float(np.nanmean(relative * np.cos(angle)) * 2.0),
+        "rain_season_sin": float(np.nanmean(relative * np.sin(angle)) * 2.0),
+        "heavy_rain_days": float((rain >= 5.0 * rain.mean()).mean()),
+        "dry_days": float((rain < 1.0).mean()),
+        "rain_with_warmth": float(np.nan_to_num(together)),
+    }
+
+
+def build_climate(arms_dir: str, daily_path: str) -> int:
+    """
+    Writes ``context_climate.pt``: every basin's climate indices, standardized on the training
+    basins (a basin with too little weather gets their mean).
+
+    :param arms_dir: Directory of the context banks.
+    :type arms_dir: str
+    :param daily_path: Pickle with ``daily`` (site id -> daily frame before the cutoff) and
+        ``split`` (site id -> train or holdout), as ``pretrain_behaviour_code.py cache`` writes.
+    :type daily_path: str
+    :return: The number of basins with indices of their own.
+    :rtype: int
+    """
+    cache = pd.read_pickle(daily_path)
+    sites = list(cache["split"])
+    table = pd.DataFrame({site: climate_indices(cache["daily"][site]) for site in sites
+                          if site in cache["daily"]}).T.reindex(sites)[CLIMATE]
+    fitted = table.loc[[site for site in sites if cache["split"][site] == "train"]]
+    scaled = ((table - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-8.0, 8.0)
+    _write_bank(arms_dir, "climate", sites, scaled.fillna(0.0).to_numpy())
+    return int(table.notna().all(axis=1).sum())
 
 
 def _write_bank(arms_dir: str, name: str, sites: List[str], matrix: np.ndarray) -> None:
@@ -752,6 +817,10 @@ def main() -> None:
     imager.add_argument("--arms-dir", required=True)
     imager.add_argument("--records-root", required=True,
                         help="Embedding records root: <root>/<state>/<site>.npz")
+    climate = commands.add_parser("climate", help="write the climate-index bank (weather only)")
+    climate.add_argument("--arms-dir", required=True)
+    climate.add_argument("--daily", required=True,
+                         help="pre-cutoff daily cache written by pretrain_behaviour_code.py cache")
     recoverer = commands.add_parser("recover", help="predict one description from others")
     recoverer.add_argument("--arms-dir", required=True)
     recoverer.add_argument("--from", dest="sources", nargs="+", required=True)
@@ -765,6 +834,8 @@ def main() -> None:
         build_imagery(args.manifest, args.arms_dir, args.records_root)
     elif args.command == "recover":
         recover(args.arms_dir, args.sources, args.targets, args.seed, args.output)
+    elif args.command == "climate":
+        print("%d basins with climate indices" % build_climate(args.arms_dir, args.daily))
     else:
         run(args.arms_dir, args.representations, args.reference, args.seed, args.n_boot,
             args.output, also_pair=args.also_pair)
