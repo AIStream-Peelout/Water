@@ -107,6 +107,27 @@ feature code gives +2.4 / +2.1 / +5.5%; the change features alone, which never r
 flow, give +11.8 / +12.4 / +16.5%; and a simulation shifted by three days still gives
 +7.5 / +14.1 / +14.2%, so much of the gain is the basin's slow state rather than storm timing.
 
+### Out-of-sample simulations on the fitting rows (seed 0)
+
+The trees are fitted on basins and years the decoder was trained on, with codes that had read
+the year being simulated. To see whether that distorts the comparison, each training basin was
+simulated by a decoder trained without its fold (the four training folds are whole river
+regions), with every water year's code written from the basin's other years
+(`simulate --out-of-sample`). On the fitting rows this lowers the simulation's median NSE of log
+flow from 0.69 to 0.62, level with the held-out basins' 0.61.
+
+| arm (seed 0; fitting rows whose targets pass the cutoff are now left out) | error cut against the reference |
+|---|---|
+| + temperature correction from gauge to basin elevation (control) | +0.4 (−1, +2) / +1.4 (0, +2) / +1.0 (−1, +2) |
+| + simulation, learned code, in-sample on the fitting rows | +13.3 (+9, +18) / +13.1 (+10, +16) / +20.3 (+15, +24) |
+| + simulation, learned code, out of sample on the fitting rows | +14.6 (+10, +20) / +13.7 (+10, +17) / +17.2 (+15, +23) |
+| + 18 numbers + simulation, out of sample | +19.0 (+13, +23) / +14.2 (+11, +19) / +19.1 (+14, +26) |
+
+Out of sample against in-sample, paired: +0.1 (−2, +2) / +0.6 (−2, +2) / +0.1 (−1, +1). The
+optimism on the fitting rows did not matter, so the three-seed table above stands as it is.
+The decoder's temperature carries a correction to basin elevation that the trees' weather lacks;
+given to the trees as a feature it is worth about 1%.
+
 ## 3. Simulation alone, with no observed flow
 
 The same decoders as pure simulators on the held-out basins after 2022: weather in, flow out,
