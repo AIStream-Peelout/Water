@@ -128,6 +128,37 @@ optimism on the fitting rows did not matter, so the three-seed table above stand
 The decoder's temperature carries a correction to basin elevation that the trees' weather lacks;
 given to the trees as a feature it is worth about 1%.
 
+### Without any weather forecast (seed 0)
+
+Everything above gives the forecaster the weather that actually happened. The opposite bound
+gives it none: the trees keep only the weather up to the issue day (`weather_past`), and the
+decoder is continued from its state on the issue day with the weather of the same season in
+up to 20 other years standing in for the unknown horizon, the simulated flows averaged
+(`simulate --unknown-weather`, tree group `simesp:<label>`; ensemble streamflow prediction).
+
+| forecaster inputs, no weather of the horizon | median skill | error cut against its reference |
+|---|---|---|
+| reference: flow, weather up to the issue day, snowpack | 22.3 / 26.4 / 39.1% | |
+| + simulation with no code | 24.1 / 27.6 / 41.4% | +2.5 (−1, +4) / +1.3 (0, +2) / +0.9 (0, +2) |
+| + simulation with the learned code | 26.7 / 29.7 / 44.3% | +3.4 (+2, +5) / +2.8 (+2, +4) / +4.0 (+3, +6) |
+| + simulation, decoder conditioned on the 18 numbers | 27.1 / 29.4 / 43.0% | +3.1 (+1, +7) / +3.0 (+2, +4) / +2.9 (+2, +5) |
+| + 18 numbers as constants | 23.3 / 29.7 / 42.6% | +3.0 (+1, +5) / +3.4 (+2, +6) / +4.5 (+3, +6) |
+| + 18 numbers + simulation with the learned code | 27.0 / 31.5 / 44.7% | +4.4 (+3, +7) / +4.7 (+4, +7) / +4.0 (+3, +5) |
+| for scale: the realized-weather reference | 38.7 / 48.4 / 57.6% | +19.8 / +29.8 / +30.2% |
+| for scale: realized weather + learned-code simulation | 49.2 / 56.7 / 66.8% | +28.9 / +39.9 / +43.7% |
+
+Learned-code simulation against the no-code one, paired: +2.3 (0, +4) / +2.3 (0, +4) /
++3.0 (+1, +5).
+
+Readings:
+1. **Most of the simulation's gain needs the horizon's weather.** With none, the learned-code
+   simulation is worth 3 to 4%, about what the 18 numbers give as constants, against 13 to 20%
+   with the realized weather. The 13 to 20% is an upper bound for operations and the 3 to 4% a
+   lower one; a real forecast sits between, closer to the upper bound at short leads.
+2. **Knowing the weather is worth far more than anything else here**: 20 to 30% for the
+   reference, and 29 to 44% once the basin-conditioned simulation turns it into flow. The
+   description of the basin matters mainly as the way to use a weather forecast.
+
 ## 3. Simulation alone, with no observed flow
 
 The same decoders as pure simulators on the held-out basins after 2022: weather in, flow out,
