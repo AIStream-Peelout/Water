@@ -205,7 +205,8 @@ class ShortRecordDataset(Dataset):
 
     def __init__(self, daily: Dict[str, pd.DataFrame], sites: List[str], scale: pd.DataFrame,
                  months: Sequence[float] = MONTHS, draws: int = 8, seed: int = 0,
-                 fixed: bool = False, aux: Optional[pd.DataFrame] = None):
+                 fixed: bool = False, aux: Optional[pd.DataFrame] = None,
+                 inputs: Sequence[str] = ("history", "statics")):
         """
         Initializes the dataset.
 
@@ -225,7 +226,11 @@ class ShortRecordDataset(Dataset):
         :type fixed: bool, optional
         :param aux: Side targets indexed by site id, defaults to None.
         :type aux: pd.DataFrame, optional
+        :param inputs: Which descriptions to build per item (``history``, ``statics``); a run
+            needs only its own reader's. Defaults to both.
+        :type inputs: Sequence[str], optional
         """
+        self.inputs = tuple(inputs)
         self.years = {site: behaviour.water_years(daily[site]) for site in sites if site in daily}
         self.site_ids = [site for site in sites if len(self.years.get(site, [])) >= 2]
         self.daily, self.scale, self.months = daily, scale, tuple(months)
@@ -264,10 +269,12 @@ class ShortRecordDataset(Dataset):
                       decoded + pd.Timedelta(days=behaviour.YEAR_DAYS - 1)]
         target = behaviour.flow_channel(block)
         target[:behaviour.SPIN_UP_DAYS] = np.nan
-        item = {"history": torch.from_numpy(read_blocks(frame, last, months)),
-                "statics": torch.from_numpy(number_vector(record, self.scale)),
-                "drivers": torch.from_numpy(behaviour.weather_channels(block)),
+        item = {"drivers": torch.from_numpy(behaviour.weather_channels(block)),
                 "target": torch.from_numpy(target)}
+        if "history" in self.inputs:
+            item["history"] = torch.from_numpy(read_blocks(frame, last, months))
+        if "statics" in self.inputs:
+            item["statics"] = torch.from_numpy(number_vector(record, self.scale))
         if self.aux is not None:
             item["aux"] = torch.tensor(self.aux.loc[site].to_numpy(dtype=np.float32))
         return item
@@ -333,7 +340,7 @@ def losses_by_length(reader, decoder, daily: Dict[str, pd.DataFrame], sites: Lis
     with torch.no_grad():
         for length in months:
             dataset = ShortRecordDataset(daily, sites, scale, months=(length,), draws=4,
-                                         seed=seed, fixed=True)
+                                         seed=seed, fixed=True, inputs=tuple(reader.encoders))
             loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
             batches = [behaviour_step(reader, decoder, {name: batch[name] for name in reader.encoders},
                                       batch["drivers"], batch["target"])["series"].item()
@@ -403,10 +410,12 @@ def train(arms_dir: str, name: str, kind: str = "record", seed: int = 0, epochs:
         early = pd.read_pickle(os.path.join(arms_dir, "benchmark.pkl"))["early"]
         aux = behaviour.standardized_aux(early, fit_sites).reindex(list(split))
         aux_head = torch.nn.Linear(code_dim, len(behaviour.AUX))
-    fit = ShortRecordDataset(daily, fit_sites, scale, months=months, draws=draws, seed=seed, aux=aux)
-    validation = ShortRecordDataset(daily, validation_sites, scale, months=months, draws=4,
-                                    seed=seed, fixed=True, aux=aux)
     reader, decoder = build_models(kind, code_dim, dim, depth, hidden, dropout)
+    wanted = tuple(reader.encoders)
+    fit = ShortRecordDataset(daily, fit_sites, scale, months=months, draws=draws, seed=seed,
+                             aux=aux, inputs=wanted)
+    validation = ShortRecordDataset(daily, validation_sites, scale, months=months, draws=4,
+                                    seed=seed, fixed=True, aux=aux, inputs=wanted)
     started = time.time()
     history = pretrain_behaviour(reader, decoder, fit, epochs=epochs, batch_size=batch_size, lr=lr,
                                  weight_decay=weight_decay, device=device,
