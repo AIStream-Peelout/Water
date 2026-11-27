@@ -77,12 +77,15 @@ IMAGE_SCALE = 3000.0                  # reflectance divisor, as in Flow Forecast
 HISTORY_CHANNELS = 7                  # log flow, valid flag and the five weather channels
 
 
-def daily_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame]]:
+def daily_record(basin: Dict, until: Optional[str] = CUTOFF
+                 ) -> Optional[Tuple[str, pd.DataFrame]]:
     """
     Reads one basin's daily flow and weather before the cutoff.
 
     :param basin: Manifest entry.
     :type basin: Dict
+    :param until: First date left out; None keeps the whole record. Defaults to the cutoff.
+    :type until: str, optional
     :return: Site id and a daily frame with ``q_mm``, ``p``, ``t`` (deg C at basin elevation)
         and ``pet``, or None when the hourly file cannot be read.
     :rtype: Tuple[str, pd.DataFrame], optional
@@ -90,8 +93,9 @@ def daily_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame]]:
     hourly = tabular.load_hourly(basin)
     if hourly is None:
         return None
-    daily = tabular.daily_frame(hourly, basin)
-    daily = daily.loc[daily.index < pd.Timestamp(CUTOFF), ["q_mm", "p", "t", "pet"]]
+    daily = tabular.daily_frame(hourly, basin)[["q_mm", "p", "t", "pet"]].copy()
+    if until is not None:
+        daily = daily.loc[daily.index < pd.Timestamp(until)]
     daily["t"] = daily["t"] + float(basin.get("temp_offset_c") or 0.0)
     return str(basin["site_id"]), daily.asfreq("1D").astype(np.float32)
 
@@ -681,6 +685,22 @@ def standardized_aux(early: pd.DataFrame, train_sites: List[str]) -> pd.DataFram
     return ((frame - fitted.mean()) / fitted.std().replace(0.0, 1.0)).clip(-5.0, 5.0)
 
 
+class CodeBlind(torch.nn.Module):
+    """
+    Hides the code from a decoder, so it learns what the weather alone says about flow.
+
+    Such a decoder is the fair "knows nothing about the basin" simulator: one trained with codes
+    and then handed an average code is being used on an input it never saw.
+    """
+
+    def __init__(self, decoder: torch.nn.Module):
+        super().__init__()
+        self.decoder = decoder
+
+    def forward(self, drivers: torch.Tensor, code: torch.Tensor) -> torch.Tensor:
+        return self.decoder(drivers, torch.zeros_like(code))
+
+
 def build_models(code_dim: int, dim: int, depth: int, hidden: int, dropout: float,
                  n_statics: int = 0, image_shape: Optional[Tuple[int, int, int]] = None,
                  patch_size: int = 16, gauged: bool = True):
@@ -745,12 +765,17 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
           weight_decay: float = 1e-4, aux_weight: float = 0.0, validation_fraction: float = 0.15,
           read_passes: int = 6, device: str = "cpu", static_banks: Sequence[str] = (),
           image_records: Optional[str] = None, modality_dropout: float = 0.3,
-          patch_size: int = 16, with_pool: bool = False, cache: Optional[Dict] = None,
+          patch_size: int = 16, with_pool: bool = False, gauged: bool = True,
+          blind: bool = False, cache: Optional[Dict] = None,
           early: Optional[pd.DataFrame] = None, statics: Optional[pd.DataFrame] = None,
           images: Optional[Dict[str, np.ndarray]] = None, pool: Optional[Dict] = None,
           verbose: bool = True) -> Dict:
     """
     Pretrains the code on the training basins and writes its banks for all basins.
+
+    Two controls: with ``gauged`` off the code is read from the static banks alone, end to end
+    (give the hand-built numbers as static banks for a decoder conditioned on them directly);
+    with ``blind`` on the decoder never sees the code (:class:`CodeBlind`).
 
     With a pool (:func:`build_pool`), its basins are added to the fitting basins and to nothing
     else: the validation basins, the basins that get a code and the scale of the banks are the
@@ -829,9 +854,11 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
         blank = np.zeros_like(next(iter(images.values())))       # the band means
         images = {site: images.get(site, blank) for site in sites + extras}
     lasting = {"statics": statics, "images": images}
-    readers = ["history"] + [reader for reader, given in (("statics", statics), ("image", images))
-                             if given is not None]
-    subsets = reader_subsets(readers)
+    readers = (["history"] if gauged else []) + [
+        reader for reader, given in (("statics", statics), ("image", images)) if given is not None]
+    if not readers:
+        raise ValueError("a run without the gauge record needs static banks or image records")
+    subsets = reader_subsets(readers) if gauged else {"": tuple(readers)}
 
     fit = WaterYearDataset(daily, fit_sites + extras, n_read=n_read, draws=draws, seed=seed,
                            aux=aux, augment=True, **lasting)
@@ -841,14 +868,16 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
                                       fixed=True, aux=aux, **lasting)
     encoder, decoder = build_models(
         code_dim, dim, depth, hidden, dropout, n_statics=0 if statics is None else statics.shape[1],
-        image_shape=None if images is None else blank.shape, patch_size=patch_size)
+        image_shape=None if images is None else blank.shape, patch_size=patch_size,
+        gauged=gauged)
     several = {}
-    if len(readers) > 1:
+    if gauged and len(readers) > 1:
         # The restored epoch is chosen on gauged and ungauged basins alike.
         several = {"modality_dropout": modality_dropout,
                    "validation_subsets": [list(subsets[""]), list(subsets["ungauged"])]}
     started = time.time()
-    history = pretrain_behaviour(encoder, decoder, fit, epochs=epochs, batch_size=batch_size,
+    history = pretrain_behaviour(encoder, CodeBlind(decoder) if blind else decoder, fit,
+                                 epochs=epochs, batch_size=batch_size,
                                  lr=lr, weight_decay=weight_decay, device=device,
                                  validation_dataset=validation, aux_head=aux_head,
                                  aux_weight=aux_weight, verbose=verbose, **several)
@@ -864,12 +893,12 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
     torch.save({"encoder": encoder.state_dict(), "decoder": decoder.state_dict()},
                os.path.join(arms_dir, "behaviour_%s.pt" % name))
     by_subset = None
-    if validation is not None and len(readers) > 1:
+    if validation is not None and gauged and len(readers) > 1:
         by_subset = validation_losses(encoder, decoder, validation, subsets, batch_size, device)
     summary = {"name": name, "seed": seed, "epochs": epochs, "code_dim": code_dim, "dim": dim,
                "depth": depth, "hidden": hidden, "dropout": dropout, "n_read": n_read,
                "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
-               "aux_weight": aux_weight, "readers": readers, "banks": banks,
+               "aux_weight": aux_weight, "readers": readers, "blind": blind, "banks": banks,
                "static_banks": list(static_banks), "image_records": image_records,
                "static_width": 0 if statics is None else int(statics.shape[1]),
                "modality_dropout": modality_dropout if len(readers) > 1 else 0.0,
@@ -1128,6 +1157,10 @@ def main() -> None:
     trainer.add_argument("--patch-size", type=int, default=16)
     trainer.add_argument("--with-pool", action="store_true",
                          help="also fit on the extra basins stored by the pool command")
+    trainer.add_argument("--no-gauge-record", dest="gauged", action="store_false",
+                         help="read the code from the static banks alone, end to end")
+    trainer.add_argument("--blind", action="store_true",
+                         help="control: the decoder never sees the code")
     aligner = commands.add_parser("align", help="fit statics (and image) readers to the code "
                                                 "of a gauge-only run")
     aligner.add_argument("--arms-dir", required=True)
