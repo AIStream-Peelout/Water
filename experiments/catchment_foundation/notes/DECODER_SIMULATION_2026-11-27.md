@@ -128,6 +128,38 @@ optimism on the fitting rows did not matter, so the three-seed table above stand
 The decoder's temperature carries a correction to basin elevation that the trees' weather lacks;
 given to the trees as a feature it is worth about 1%.
 
+### A fairer reference and the missing control (three seeds)
+
+Two controls the outside reviews asked for. The trees' own weather features reach back 30
+days, while the decoder integrates months of daily weather; `weather_long` gives the trees
+rain, evaporation demand, temperature, frost, snowfall and thaw totals over the previous 30
+to 180 days. And the 18 numbers were never paired with the simulation of the decoder
+conditioned on them. (Reference here: 38.7 / 48.9 / 58.0%; fitting rows whose targets pass the
+cutoff are left out.)
+
+| forecaster inputs | error cut against the reference | against the long-memory reference |
+|---|---|---|
+| + months of weather memory | +2.3 [3] / +2.6 [3] / +4.5 [3] | |
+| + memory + simulation with no code | +9.5 [3] / +6.2 [3] / +9.3 [3] | +5.9 [3] / +3.8 [3] / +5.0 [3] |
+| + memory + simulation, decoder on the 18 numbers | +15.3 [3] / +13.3 [3] / +17.4 [3] | +12.6 [3] / +10.6 [3] / +13.0 [3] |
+| + memory + simulation, learned code | +15.2 [3] / +12.3 [3] / +18.7 [3] | +10.9 [3] / +9.7 [3] / +13.2 [3] |
+| + 18 numbers + simulation with no code | +14.7 [3] / +11.4 [3] / +12.3 [3] | +13.3 [3] / +8.8 [3] / +10.3 [3] |
+| + 18 numbers + simulation, decoder on the 18 numbers | +15.6 [3] / +16.3 [3] / +19.7 [3] | +13.7 [3] / +13.7 [3] / +14.6 [3] |
+| + 18 numbers + simulation, learned code | +16.7 [3] / +14.1 [3] / +19.7 [3] | +14.3 [3] / +12.1 [3] / +15.5 [3] |
+
+Paired: learned-code simulation against no-code simulation, both with the long memory,
++7.2 [3] / +7.0 [3] / +7.7 [3]. With the 18 numbers also given as constants, the learned-code
+simulation against the simulation of the decoder conditioned on the 18 numbers:
++0.3 [0] / −0.6 [1] / +1.7 [1].
+
+Readings:
+1. Months of weather memory are worth 2 to 5% to the trees. Against that fairer reference the
+   simulation with a description of the basin still cuts error by 10 to 13%.
+2. With every control in place, knowing the basin is worth about 7% through the decoder.
+3. The learned code adds nothing over the 18 hand-built numbers. That is now tested four
+   ways: as the decoder's description, with the 18 numbers alongside, in pure simulation and
+   in the GRU forecaster.
+
 ### Without any weather forecast (seed 0)
 
 Everything above gives the forecaster the weather that actually happened. The opposite bound
@@ -263,8 +295,7 @@ What they say the results do and do not show, and I agree:
   the learned code holds more than the 18 hand-built numbers: it ties them as the decoder's
   description, in pure simulation and in the GRU forecaster, and loses to them as constants.
 - **The reference trees have a 30-day weather memory and band totals; the decoder has months
-  of daily weather.** Part of the simulation's gain is that memory (see the long-memory
-  control in §2 when in).
+  of daily weather.** That memory is worth 2 to 5% of the gain (§2, fairer reference).
 - **It needs the horizon's weather** (§2, last table).
 - **Five regions and one fold that guided every choice.** Basin intervals are not
   confirmation; the reserved fold is.
