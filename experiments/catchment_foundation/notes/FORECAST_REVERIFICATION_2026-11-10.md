@@ -471,12 +471,21 @@ Median basin skill against persistence on the 53 held-out basins, 2023+, day 1�
 | trees: flow history and day of year | 13.6 / 18.6 / 31.1% |
 | trees: + weather (physical units) | 30.9 / 36.4 / 35.3% |
 | trees: + weather + snowpack | 33.4 / 41.5 / 41.6% |
-| trees: + weather standardized per basin, as the neural forecasters receive it | 7.0 / 10.4 / 20.5% |
+| trees: + weather standardized per basin, as the neural forecasters receive it (wrong, see the correction below) | 7.0 / 10.4 / 20.5% |
 
 Weather roughly doubles the trees' skill at day 1–7, so the signal the Crossformer ignores is
 learnable. Standardizing the weather per basin destroys its value on unseen basins (−29 / −43 /
 −36% against physical units; only −6 to −9% on trained-on basins): a z-score of temperature or
 rain cannot be interpreted without the basin's own mean and spread.
+
+**Correction, 2026-11-27.** The standardized-weather row and the paragraph above are wrong.
+`weather_z` took each basin's mean and spread from training-basin rows only, so every held-out
+basin had no weather at all; an arm scoring below flow history alone should have told me so.
+The outside audit of 2026-11-21 found it (`FORECAST_DIAGNOSIS_2026-11-21.md`); it is fixed in
+`tabular_forecast_baseline.features` with a regression test. With each basin's own statistics
+the audit gets 30.0 / 35.5 / 37.4% on this cohort against 31.7 / 36.6 / 35.3% in physical
+units. Standardizing per basin costs a few percent at most and does not explain the
+Crossformer's weakness; §15 gives the cause.
 
 With a forecaster that uses the weather, context does matter on basins it was fitted on, and any
 identifier does it: statics, statics + signatures, v10, v10 shuffled and a categorical basin id
@@ -499,7 +508,7 @@ Held-out basins, 2023+, median skill at day 1–3 / 4–7 / 8–14 and error cut
 | flow history | 18.7 / 21.1 / 35.1% | |
 | + weather | 37.3 / 48.4 / 58.5% | |
 | + weather + snowpack (reference) | 39.6 / 49.8 / 58.3% | |
-| + weather standardized per basin | 12.8 / 16.3 / 25.5% | −39 / −56 / −67% |
+| + weather standardized per basin (corrected 2026-11-27, three seeds; the bug of §13 had given 12.8 / 16.3 / 25.5% and −39 / −56 / −67%) | 36.0 / 47.8 / 56.7% | −5.6 / −4.8 / −5.3% against "+ weather" |
 | reference + statics | 40.9 / 50.8 / 61.3% | +3.0 (−1,+4) / +3.2 (+1,+6) / +4.6 (+3,+7) |
 | reference + 8 flow signatures | 41.1 / 51.8 / 61.3% | +5.4 (+3,+10) / +6.8 (+5,+10) / +6.0 (+5,+7) |
 | reference + statics + signatures | 40.4 / 53.1 / 64.2% | **+6.2 (+3,+9) / +8.4 (+6,+11) / +9.1 (+7,+12)** |
