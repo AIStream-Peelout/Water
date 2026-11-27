@@ -400,20 +400,22 @@ def basin_codes(arms_dir: str, reader: torch.nn.Module, report: Dict, which: str
     """
     if which not in CODES:
         raise ValueError("which must be one of %s but got %s" % (CODES, which))
-    if len(report["readers"]) > 1:
-        raise NotImplementedError("simulation is set up for runs with a single reader, not %s"
-                                  % report["readers"])
+    if "image" in report["readers"]:
+        raise NotImplementedError("simulation is not set up for runs with an image reader")
     cache = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))
     split = cache["split"]
     sites = list(split)
     train_sites = sorted(site for site in sites if split[site] == "train")
-    if "history" not in report["readers"]:
+    statics = None
+    if "statics" in report["readers"]:
         statics = behaviour.load_static_banks(arms_dir, report["static_banks"], train_sites)
         statics = statics.reindex(sites).fillna(0.0).astype(np.float32)
+    if "history" not in report["readers"]:
         codes = behaviour.write_codes(reader, cache["daily"], sites, 1, 1, statics=statics)
     else:
+        # A run that reads the record and a static description is written from both.
         codes = behaviour.write_codes(reader, cache["daily"], sites, report["n_read"],
-                                      report.get("read_passes", READ_PASSES))
+                                      report.get("read_passes", READ_PASSES), statics=statics)
     mean = codes.loc[codes.index.intersection(train_sites)].mean()
     codes = codes.reindex(sites)
     codes = codes.where(codes.notna().all(axis=1), mean, axis=1)
@@ -606,7 +608,7 @@ def simulate(arms_dir: str, run: str, which: str = "own", seed: int = 0,
         wanted = [site for site in codes.index
                   if site in daily and (site in chosen if chosen is not None else site not in taken)]
         by_year = {}
-        if out_of_sample and "history" in report["readers"]:
+        if out_of_sample and report["readers"] == ["history"]:
             early = pd.read_pickle(os.path.join(arms_dir, behaviour.CACHE))["daily"]
             by_year = other_year_codes(reader, early, wanted, report["n_read"])
         for site in wanted:
