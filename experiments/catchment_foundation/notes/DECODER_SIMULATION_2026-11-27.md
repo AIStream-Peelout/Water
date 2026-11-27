@@ -182,8 +182,14 @@ up to 20 other years standing in for the unknown horizon, the simulated flows av
 Learned-code simulation against the no-code one, paired: +2.3 (0, +4) / +2.3 (0, +4) /
 +3.0 (+1, +5).
 
+The GRU forecaster of §4 trained and scored the same way (`--no-horizon-weather`: rain,
+temperature and evaporation demand after the issue day are hidden, the season is kept):
+29.8 / 32.3 / 42.3% skill with the learned code, +4.4 (+2, +7) / +4.5 (+3, +7) / +3.4 (+2, +5)
+against this table's reference; 26.2 / 28.6 / 40.4% with no description. Code against no
+description, paired: +1.0 (−1, +3) / +0.9 (0, +2) / +0.5 (−1, +2).
+
 Readings:
-1. **Most of the simulation's gain needs the horizon's weather.** With none, the learned-code
+1. **Most of the gain needs the horizon's weather.** With none, the learned-code
    simulation is worth 3 to 4%, about what the 18 numbers give as constants, against 13 to 20%
    with the realized weather. The 13 to 20% is an upper bound for operations and the 3 to 4% a
    lower one; a real forecast sits between, closer to the upper bound at short leads.
