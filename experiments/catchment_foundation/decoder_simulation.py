@@ -231,7 +231,7 @@ def basin_codes(arms_dir: str, reader: torch.nn.Module, report: Dict, which: str
         codes = behaviour.write_codes(reader, cache["daily"], sites, 1, 1, statics=statics)
     else:
         codes = behaviour.write_codes(reader, cache["daily"], sites, report["n_read"],
-                                      READ_PASSES)
+                                      report.get("read_passes", READ_PASSES))
     mean = codes.loc[codes.index.intersection(train_sites)].mean()
     codes = codes.reindex(sites)
     codes = codes.where(codes.notna().all(axis=1), mean, axis=1)
@@ -243,7 +243,7 @@ def basin_codes(arms_dir: str, reader: torch.nn.Module, report: Dict, which: str
         codes = shuffle_within_split(codes, split, seed)
     elif which == "other_state":
         with open(cache["manifest"]) as file:
-            states = {str(basin["site_id"]): str(basin.get("state", ""))
+            states = {str(basin["site_id"]): str(basin["state"])
                       for basin in json.load(file)["basins"]}
         codes = shuffle_within_split(codes, split, seed, apart=states)
     elif which == "donor":
@@ -270,10 +270,12 @@ def nearest_training_codes(codes: pd.DataFrame, location: pd.DataFrame,
     """
     donors = [site for site in train_sites if site in codes.index and site in location.index]
     donor_place = location.loc[donors].to_numpy(np.float64)
+    unplaced = [site for site in codes.index if site not in location.index]
+    if unplaced:
+        raise ValueError("%d basins have no location to find a donor from, e.g. %s"
+                         % (len(unplaced), unplaced[:3]))
     borrowed = codes.copy()
     for site in codes.index:
-        if site not in location.index:
-            continue
         distance = ((donor_place - location.loc[site].to_numpy(np.float64)) ** 2).sum(axis=1)
         distance[[donor == site for donor in donors]] = np.inf
         borrowed.loc[site] = codes.loc[donors[int(np.argmin(distance))]].to_numpy()
@@ -306,9 +308,11 @@ def shuffle_within_split(codes: pd.DataFrame, split: Dict[str, str], seed: int,
         if apart is not None:
             for site in members:
                 others = [other for other in members if apart[other] != apart[site]]
-                if others:
-                    donor = others[int(rng.integers(len(others)))]
-                    shuffled.loc[site] = codes.loc[donor].to_numpy()
+                if not others:
+                    raise ValueError("no basin of split %s lies outside group %r of %s"
+                                     % (label, apart[site], site))
+                donor = others[int(rng.integers(len(others)))]
+                shuffled.loc[site] = codes.loc[donor].to_numpy()
             continue
         order = rng.permutation(len(members))
         shift = int(rng.integers(1, len(members)))

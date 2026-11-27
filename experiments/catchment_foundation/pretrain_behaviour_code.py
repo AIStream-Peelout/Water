@@ -903,6 +903,7 @@ def train(arms_dir: str, name: str, seed: int = 0, epochs: int = 60, code_dim: i
         by_subset = validation_losses(encoder, decoder, validation, subsets, batch_size, device)
     summary = {"name": name, "seed": seed, "epochs": epochs, "code_dim": code_dim, "dim": dim,
                "depth": depth, "hidden": hidden, "dropout": dropout, "n_read": n_read,
+               "read_passes": read_passes,
                "draws": draws, "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
                "aux_weight": aux_weight, "readers": readers, "blind": blind,
                "leave_out_folds": list(leave_out_folds), "banks": banks,

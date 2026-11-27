@@ -261,11 +261,9 @@ def features(data: pd.DataFrame, groups: tuple, arms_dir: str, fit_rows: np.ndar
         elif group == "weather_z":
             # What the neural forecasters see: each basin's weather standardized on its own
             # pre-cutoff statistics, which hides absolute levels such as the freezing point.
-            # Every basin has such statistics, held-out ones included (they need no flow), so
-            # they are taken from all basins' rows whose horizon ends before the cutoff.
-            settled = pd.to_datetime(data["date"]) < (
-                pd.Timestamp(CUTOFF) - pd.Timedelta(days=max(last for _, last in BANDS.values())))
-            stats = data[settled.to_numpy()].groupby("site_id")[WEATHER].agg(["mean", "std"])
+            # A held-out basin has such statistics too (weather needs no fitted model), so
+            # they are taken from every basin's own rows whose horizon ends before the cutoff.
+            stats = data[settled_rows(data)].groupby("site_id")[WEATHER].agg(["mean", "std"])
             mean = stats.xs("mean", axis=1, level=1).reindex(data.site_id).to_numpy()
             std = stats.xs("std", axis=1, level=1).reindex(data.site_id).to_numpy()
             block = ((data[WEATHER].to_numpy() - mean) / np.where(std > 0, std, 1.0))
@@ -382,6 +380,23 @@ def score(data: pd.DataFrame, predictions: Dict, reference: str, n_boot: int = 2
     return report
 
 
+def settled_rows(data: pd.DataFrame) -> np.ndarray:
+    """
+    Marks the rows whose whole horizon lies before the cutoff.
+
+    A row issued in the last days before the cutoff has a target that reaches past it; such
+    rows are left out of fitting so that nothing after the cutoff is trained on.
+
+    :param data: Forecast table with ``date`` (the issue day).
+    :type data: pd.DataFrame
+    :return: Boolean array, True where the last target day is before the cutoff.
+    :rtype: np.ndarray
+    """
+    horizon = max(last for _, last in BANDS.values())
+    last_issue = pd.Timestamp(CUTOFF) - pd.Timedelta(days=horizon)
+    return (pd.to_datetime(data["date"]) < last_issue).to_numpy()
+
+
 def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int, seed: int,
         output: Optional[str], reference: Optional[str] = None,
         also_pair: Sequence[str] = ()) -> Dict:
@@ -389,7 +404,7 @@ def run(data_path: str, arms_dir: str, arm_names: List[str], fit_subsample: int,
     from sklearn.ensemble import HistGradientBoostingRegressor
     data = pd.read_pickle(data_path)
     fit_rows = ((data.period == "fit") & (data.split == "train")).to_numpy()
-    fit_index = np.flatnonzero(fit_rows)[::fit_subsample]
+    fit_index = np.flatnonzero(fit_rows & settled_rows(data))[::fit_subsample]
     print("%d basins; fitting on %d rows of %d training basins"
           % (data.site_id.nunique(), len(fit_index), data.site_id[fit_rows].nunique()), flush=True)
     predictions, started = {}, time.time()

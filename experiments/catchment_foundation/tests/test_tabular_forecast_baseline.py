@@ -131,6 +131,12 @@ class TestScore(unittest.TestCase):
             np.testing.assert_allclose(own.mean(axis=0), 0.0, atol=1e-5)
             np.testing.assert_allclose(own.std(axis=0, ddof=1), 1.0, atol=1e-5)
 
+    def test_rows_whose_horizon_passes_the_cutoff_are_not_settled(self):
+        cutoff = pd.Timestamp(tabular.CUTOFF)
+        data = pd.DataFrame({"date": [cutoff - pd.Timedelta(days=15), cutoff - pd.Timedelta(days=14),
+                                      cutoff - pd.Timedelta(days=1), cutoff + pd.Timedelta(days=30)]})
+        self.assertEqual(list(tabular.settled_rows(data)), [True, False, False, False])
+
     def test_an_arm_is_a_named_arm_or_any_joined_list_of_groups(self):
         self.assertEqual(tabular.arm_groups("flow+weather"), ("flow", "weather"))
         self.assertEqual(tabular.arm_groups("flow+snow+some_bank"), ("flow", "snow", "some_bank"))

@@ -257,8 +257,8 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
         described = described.reindex(sites).fillna(0.0).astype(np.float32)
     else:
         described = pd.DataFrame(np.zeros((len(sites), 1), dtype=np.float32), index=sites)
-    settled = pd.to_datetime(data["date"]) < pd.Timestamp(tabular.CUTOFF) - pd.Timedelta(days=HORIZON)
-    usable = data.site_id.isin(sites) & (data.period == "fit") & (data.split == "train") & settled
+    fitting = (data.period == "fit") & (data.split == "train") & tabular.settled_rows(data)
+    usable = data.site_id.isin(sites) & fitting
     fit_rows = data.loc[usable & data.site_id.isin(fit_sites), ["site_id", "date"]]
     validation_rows = data.loc[usable & data.site_id.isin(validation_sites), ["site_id", "date"]]
     validation_rows = validation_rows.iloc[::max(1, len(validation_rows) // validation_windows)]
@@ -329,7 +329,7 @@ def compare(arms_dir: str, forecasters: List[str], tree_arms: List[str], fit_sub
     from sklearn.ensemble import HistGradientBoostingRegressor
     data = pd.read_pickle(os.path.join(arms_dir, "tabular.pkl"))
     fit_rows = ((data.period == "fit") & (data.split == "train")).to_numpy()
-    fit_index = np.flatnonzero(fit_rows)[::fit_subsample]
+    fit_index = np.flatnonzero(fit_rows & tabular.settled_rows(data))[::fit_subsample]
     predictions = {}
     for arm in tree_arms:
         matrix, categorical = tabular.features(data, tabular.arm_groups(arm), arms_dir, fit_rows)

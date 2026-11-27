@@ -220,6 +220,18 @@ class TestOtherCodes(unittest.TestCase):
             self.assertNotEqual(state[donor], state[site])
             self.assertEqual(split[donor], split[site])
 
+    def test_other_state_refuses_a_split_with_a_single_state(self):
+        codes = pd.DataFrame({"value": [0.0, 1.0]}, index=["a0", "a1"])
+        with self.assertRaises(ValueError):
+            simulation.shuffle_within_split(codes, {"a0": "train", "a1": "train"}, 0,
+                                            apart={"a0": "CO", "a1": "CO"})
+
+    def test_donor_refuses_a_basin_without_a_location(self):
+        location = pd.DataFrame({"x": [0.0], "y": [0.0]}, index=["t0"])
+        codes = pd.DataFrame({"value": [1.0, 2.0]}, index=["t0", "h0"])
+        with self.assertRaises(ValueError):
+            simulation.nearest_training_codes(codes, location, ["t0"])
+
     def test_donor_is_the_nearest_training_basin_other_than_itself(self):
         location = pd.DataFrame({"x": [0.0, 1.0, 5.0, 5.2], "y": [0.0, 0.0, 0.0, 0.0]},
                                 index=["t0", "t1", "t2", "h0"])
