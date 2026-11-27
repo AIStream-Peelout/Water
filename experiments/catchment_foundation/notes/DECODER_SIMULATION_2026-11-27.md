@@ -213,6 +213,26 @@ Decoder validation loss (log flow, 60 validation basins, seeds 0 / 1 / 2): learn
 0.505 / 0.507 / 0.431, decoder on the 18 numbers 0.506 / 0.493 / 0.425, no code
 1.297 / 1.111 / 0.921.
 
+**Other descriptions that need no gauge.** Decoders trained end to end on a description
+(`train --no-gauge-record --static-banks ...`), same scoring. The climate indices are eleven
+numbers from the basin's weather alone (`representation_benchmark.py climate`: rain,
+evaporation demand, aridity, temperature and its swing, snow share, rain seasonality, heavy
+and dry days).
+
+| description given to the decoder | median NSE of log flow | median NSE | basins above 0.5 | CO | FL | PA | UT | WY | validation loss |
+|---|---|---|---|---|---|---|---|---|---|
+| statics + location + climate indices | 0.19 | 0.23 | 32% | −1.83 | 0.16 | 0.65 | 0.05 | 0.54 | 1.278 / 0.904 / 0.897 |
+| climate indices alone | 0.15 | 0.16 | 28% | −1.05 | 0.17 | 0.56 | −0.47 | 0.44 | 1.359 / 1.084 / 0.850 |
+| statics + location, end to end | 0.10 | 0.21 | 27% | −1.93 | 0.13 | 0.64 | −0.15 | 0.52 | 1.215 / 0.905 / 0.890 |
+| statics code aligned to the gauge code (as above) | 0.14 | 0.30 | 32% | −2.22 | 0.13 | 0.70 | −0.07 | 0.62 | 1.239 / 0.877 / 0.861 |
+| no description (as above) | 0.05 | 0.16 | 26% | −1.37 | 0.07 | 0.32 | −0.28 | 0.34 | 1.297 / 1.111 / 0.921 |
+
+Eleven climate numbers do about as well as the whole static description, and adding them to
+it gives the best ungauged row, but every one of them is far from the gauged 0.59 and all
+fail in the Colorado region. Two cautions: the weather these indices are computed from exists
+only for hours the gauge reported, so they partly describe when the gauge runs; and none of
+these descriptions has been tested in the trees beyond the statics code of §2.
+
 ## 4. A neural forecaster from the same parts (seed 0)
 
 `decoder_forecaster.py`: Flow Forecast's `DriverConditionedDecoder` (a GRU) reads 180 days of
