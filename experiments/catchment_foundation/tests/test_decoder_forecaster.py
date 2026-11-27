@@ -62,6 +62,20 @@ class TestForecastWindows(unittest.TestCase):
         moved = np.abs(self.windows[0]["target"].numpy() - again[0]["target"].numpy())
         self.assertGreater(float(np.nanmax(moved)), 1.0)
 
+    def test_the_horizons_weather_can_be_hidden(self):
+        rows = pd.DataFrame({"site_id": ["a"], "date": [self.issue]})
+        hidden = forecaster.ForecastWindows(self.daily, self.scale, rows, self.description,
+                                            history_days=30, horizon_weather=False)[0]["drivers"].numpy()
+        shown = self.windows[0]["drivers"].numpy()
+        np.testing.assert_array_equal(hidden[30:, :3], 0.0)
+        np.testing.assert_array_equal(hidden[:30], shown[:30])
+        np.testing.assert_array_equal(hidden[30:, 3:], shown[30:, 3:])      # the season stays
+        changed = {"a": self.daily["a"].copy()}
+        changed["a"].loc[changed["a"].index > self.issue, ["p", "t", "pet"]] += 5.0
+        again = forecaster.ForecastWindows(changed, self.scale, rows, self.description,
+                                           history_days=30, horizon_weather=False)[0]["drivers"].numpy()
+        np.testing.assert_array_equal(hidden, again)
+
     def test_a_window_before_the_record_starts_is_padded(self):
         rows = pd.DataFrame({"site_id": ["a"], "date": [self.daily["a"].index[10]]})
         item = forecaster.ForecastWindows(self.daily, self.scale, rows, self.description,

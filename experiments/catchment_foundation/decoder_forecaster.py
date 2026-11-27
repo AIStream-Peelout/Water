@@ -62,7 +62,8 @@ class ForecastWindows(Dataset):
 
     def __init__(self, daily: Dict[str, pd.DataFrame], scale: Dict[str, float], rows: pd.DataFrame,
                  description: pd.DataFrame, history_days: int = 180, samples: Optional[int] = None,
-                 seed: int = 0, clip_target: Optional[float] = TARGET_CLIP):
+                 seed: int = 0, clip_target: Optional[float] = TARGET_CLIP,
+                 horizon_weather: bool = True):
         """
         Initializes the dataset.
 
@@ -83,8 +84,13 @@ class ForecastWindows(Dataset):
         :type seed: int, optional
         :param clip_target: Bound on the target change; None leaves it as it is.
         :type clip_target: float, optional
+        :param horizon_weather: Whether the realized rain, temperature and evaporation demand of
+            the 14 days after the issue day are served. Off, they are zero and only the season
+            is known there: a forecast with no weather forecast at hand. Defaults to True.
+        :type horizon_weather: bool, optional
         """
         self.history_days, self.samples, self.clip_target = history_days, samples, clip_target
+        self.horizon_weather = horizon_weather
         self.rng = np.random.default_rng(seed)
         self.description = description
         self.weather, self.flow, self.first = {}, {}, {}
@@ -122,6 +128,8 @@ class ForecastWindows(Dataset):
         drivers[:, 7] = np.log(level * self.depth_scale[site] + behaviour.FLOW_FLOOR_MM)
         drivers[:, 8] = np.log1p(max(level, 0.0))
         ahead = np.arange(source.start, source.stop) > issue
+        if not self.horizon_weather:
+            drivers[placed, :3] = np.where(ahead[:, None], 0.0, drivers[placed, :3])
         future = np.where(ahead, change, np.nan)
         if self.clip_target is not None:
             future = np.clip(future, -self.clip_target, self.clip_target)
@@ -200,8 +208,8 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
           epochs: int = 30, samples_per_epoch: int = 60000, batch_size: int = 256,
           lr: float = 1e-3, weight_decay: float = 1e-4, code_dim: int = 32, dim: int = 64,
           hidden: int = 64, dropout: float = 0.1, history_days: int = 180,
-          validation_fraction: float = 0.15, validation_windows: int = 12000,
-          device: str = "cpu", verbose: bool = True) -> Dict:
+          horizon_weather: bool = True, validation_fraction: float = 0.15,
+          validation_windows: int = 12000, device: str = "cpu", verbose: bool = True) -> Dict:
     """
     Fits one forecaster on the tree forecaster's fitting rows and forecasts its scoring rows.
 
@@ -234,6 +242,9 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     :type dropout: float, optional
     :param history_days: Days read up to the issue day, defaults to 180.
     :type history_days: int, optional
+    :param horizon_weather: Whether the forecaster is given the realized weather of the horizon
+        (see :class:`ForecastWindows`), defaults to True.
+    :type horizon_weather: bool, optional
     :param validation_fraction: Share of the training basins held out to pick the epoch, the
         same basins as a pretraining run of this seed. Defaults to 0.15.
     :type validation_fraction: float, optional
@@ -263,7 +274,7 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     validation_rows = data.loc[usable & data.site_id.isin(validation_sites), ["site_id", "date"]]
     validation_rows = validation_rows.iloc[::max(1, len(validation_rows) // validation_windows)]
     torch.manual_seed(seed)
-    options = {"history_days": history_days}
+    options = {"history_days": history_days, "horizon_weather": horizon_weather}
     fit = ForecastWindows(cache["daily"], cache["scale"], fit_rows, described, samples=samples_per_epoch,
                           seed=seed, **options)
     validation = ForecastWindows(cache["daily"], cache["scale"], validation_rows, described, **options)
@@ -289,7 +300,7 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     report = {"name": name, "description": list(description), "seed": seed, "epochs": epochs,
               "samples_per_epoch": samples_per_epoch, "batch_size": batch_size, "lr": lr,
               "weight_decay": weight_decay, "code_dim": code_dim, "dim": dim, "hidden": hidden,
-              "dropout": dropout, "history_days": history_days,
+              "dropout": dropout, "history_days": history_days, "horizon_weather": horizon_weather,
               "description_width": int(described.shape[1]), "fit_basins": len(fit_sites),
               "fit_rows": int(len(fit_rows)), "validation_basins": len(validation_sites),
               "validation_windows": int(len(validation_rows)), "minutes": round(minutes, 2),
@@ -384,6 +395,8 @@ def main() -> None:
     trainer.add_argument("--hidden", type=int, default=64)
     trainer.add_argument("--dropout", type=float, default=0.1)
     trainer.add_argument("--history-days", type=int, default=180)
+    trainer.add_argument("--no-horizon-weather", dest="horizon_weather", action="store_false",
+                         help="hide the realized weather of the horizon from the forecaster")
     trainer.add_argument("--device", default="cpu")
     comparer = commands.add_parser("compare", help="score forecasters next to tree arms")
     comparer.add_argument("--arms-dir", required=True)
