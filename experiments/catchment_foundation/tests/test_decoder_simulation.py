@@ -117,6 +117,66 @@ class TestSimulateBasin(unittest.TestCase):
         self.assertGreater(np.nanmax(np.abs(first - second)), 1e-3)
 
 
+class TestUnknownWeather(unittest.TestCase):
+    def setUp(self):
+        from flood_forecast.meta_models.behaviour_pretrain import DriverConditionedDecoder
+        torch.manual_seed(0)
+        self.decoder = DriverConditionedDecoder(5, 4, hidden_dim=8).eval()
+        self.code = torch.randn(4)
+        # Three years without a leap day whose weather repeats exactly every 365 days.
+        index = pd.date_range("2017-01-01", "2019-12-31", freq="1D")
+        year = record("2017-01-01", "2017-12-31", seed=3)
+        tiled = pd.concat([year] * 3, ignore_index=True)
+        tiled.index = index
+        self.daily = tiled
+        self.issue = np.array([self.daily.index.get_loc(pd.Timestamp("2018-04-10")),
+                               self.daily.index.get_loc(pd.Timestamp("2018-05-20"))])
+
+    def test_identical_other_years_reproduce_the_realized_simulation(self):
+        realized, _ = simulation.simulate_basin(self.decoder, self.daily, self.code)
+        changes = simulation.unknown_weather_changes(self.decoder, self.daily, self.code, self.issue,
+                                                     usable_before=len(self.daily))
+        self.assertEqual(changes.shape, (2, 1 + simulation.HORIZON_DAYS))
+        for row, day in enumerate(self.issue):
+            np.testing.assert_allclose(changes[row], realized[day:day + 1 + simulation.HORIZON_DAYS],
+                                       atol=1e-5)
+
+    def test_the_horizons_own_weather_is_not_used(self):
+        before = simulation.unknown_weather_changes(self.decoder, self.daily, self.code, self.issue,
+                                                    usable_before=len(self.daily))
+        changed = self.daily.copy()
+        for day in self.issue:
+            changed.iloc[day + 1:day + 1 + simulation.HORIZON_DAYS, changed.columns.get_loc("p")] += 80.0
+        after = simulation.unknown_weather_changes(self.decoder, changed, self.code, self.issue,
+                                                   usable_before=len(self.daily))
+        np.testing.assert_allclose(before[0], after[0], atol=1e-6)
+        np.testing.assert_allclose(before[1, 0], after[1, 0], atol=1e-6)
+        realized, _ = simulation.simulate_basin(self.decoder, changed, self.code)
+        self.assertGreater(float(np.abs(realized[self.issue[0] + 3] - after[0, 3])), 1e-4)
+
+    def test_stand_in_weather_comes_only_from_before_the_limit(self):
+        limit = self.daily.index.get_loc(pd.Timestamp("2018-01-01"))
+        changes = simulation.unknown_weather_changes(self.decoder, self.daily, self.code, self.issue,
+                                                     usable_before=limit)
+        self.assertTrue(np.isfinite(changes).all())            # the 2017 season is available
+        none = simulation.unknown_weather_changes(self.decoder, self.daily, self.code, self.issue,
+                                                  usable_before=30)
+        self.assertTrue(np.isfinite(none[:, 0]).all())
+        self.assertTrue(np.isnan(none[:, 1:]).all())
+
+    def test_a_blind_decoder_gives_the_same_result_for_any_code(self):
+        blind = behaviour.CodeBlind(self.decoder)
+        first = simulation.unknown_weather_changes(blind, self.daily, self.code, self.issue, len(self.daily))
+        second = simulation.unknown_weather_changes(blind, self.daily, -self.code, self.issue, len(self.daily))
+        np.testing.assert_allclose(first, second, atol=1e-7)
+
+    def test_features_average_the_right_days(self):
+        changes = np.log(np.array([[2.0] + [4.0] * 3 + [8.0] * 4 + [2.0] * 7]))
+        values = simulation.unknown_weather_features(changes, scale=1.0 / 24.0)
+        np.testing.assert_allclose(values[0, :3], np.log([2.0, 4.0, 1.0]), atol=1e-6)
+        np.testing.assert_allclose(values[0, 3:], [2.0, 6.0, 0.0], atol=1e-5)
+
+
 class TestFeatures(unittest.TestCase):
     def test_lead_bands_line_up_with_the_issue_day(self):
         index = pd.date_range("2020-01-01", periods=40, freq="1D")

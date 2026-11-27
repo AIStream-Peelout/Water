@@ -48,6 +48,7 @@ MAX_LOG_RATIO = 3.0                   # simulated change is capped at a factor o
 HORIZON_DAYS = max(last for _, last in tabular.BANDS.values())
 FEATURES = [f"sim_{kind}_{band}" for kind in ("dlog", "add", "dq") for band in tabular.BANDS]
 FEATURES += ["sim_err0", "sim_err7"]
+MEMBER_YEARS = 10                     # other years whose weather stands in for an unknown horizon
 
 
 def whole_record(basin: Dict) -> Optional[Tuple[str, pd.DataFrame]]:
@@ -163,6 +164,178 @@ def simulate_basin(decoder: torch.nn.Module, daily: pd.DataFrame, code: torch.Te
                     simulated[write_from:stop] = output[row, write_from - begin:stop - begin]
                     overrun[stop:run_to] = output[row, stop - begin:]
     return simulated, overrun
+
+
+def unknown_weather_changes(decoder: torch.nn.Module, daily: pd.DataFrame, code: torch.Tensor,
+                            issue_days: np.ndarray, usable_before: int,
+                            members: int = MEMBER_YEARS, batch_size: int = 4096) -> np.ndarray:
+    """
+    Simulates the 14 days after each issue day without knowing their weather.
+
+    The decoder is run on the realized weather up to the issue day. From its state on that day
+    it is then continued once for each of several other years, with that year's weather of the
+    same season standing in for the unknown horizon, and the simulated flows are averaged. This
+    is the classic ensemble-streamflow-prediction recipe, and what a forecast can rest on when
+    no weather forecast is at hand.
+
+    :param decoder: The pretrained decoder (plain or wrapped in ``CodeBlind``).
+    :type decoder: torch.nn.Module
+    :param daily: The basin's daily frame without gaps (``p``, ``t``, ``pet``).
+    :type daily: pd.DataFrame
+    :param code: The basin code of shape (code_dim,).
+    :type code: torch.Tensor
+    :param issue_days: Positions of the issue days in ``daily``.
+    :type issue_days: np.ndarray
+    :param usable_before: Stand-in weather is only taken from positions before this one (the
+        cutoff), so nothing after it is used for any issue day.
+    :type usable_before: int
+    :param members: Other years tried on each side of the issue day, defaults to
+        ``MEMBER_YEARS``; a year without weather for those days is skipped.
+    :type members: int, optional
+    :param batch_size: Continuations per forward pass, defaults to 4096.
+    :type batch_size: int, optional
+    :return: Array of shape (issue days, 1 + 14): the simulated log flow on the issue day, then
+        the log of the member-mean simulated flow on each of the 14 days after it. NaN where
+        the issue day has no simulation or no other year has weather.
+    :rtype: np.ndarray
+    """
+    inner = decoder.decoder if isinstance(decoder, behaviour.CodeBlind) else decoder
+    if isinstance(decoder, behaviour.CodeBlind):
+        code = torch.zeros_like(code)
+    drivers = behaviour.weather_channels(daily)
+    present = daily[["p", "t", "pet"]].notna().all(axis=1).to_numpy()
+    hidden = np.full((len(daily), inner.hidden_dim), np.nan, dtype=np.float32)
+    start_state = torch.tanh(inner.initial_state(code.unsqueeze(0))).reshape(1, 1, inner.hidden_dim)
+    with torch.no_grad():
+        for begin, write_from, stop in year_blocks(daily.index):
+            inputs = torch.cat([torch.from_numpy(drivers[begin:stop]),
+                                code.unsqueeze(0).expand(stop - begin, -1)], dim=-1).unsqueeze(0)
+            states, _ = inner.rnn(inputs, start_state.contiguous())
+            hidden[write_from:stop] = states[0, write_from - begin:].numpy()
+        result = np.full((len(issue_days), 1 + HORIZON_DAYS), np.nan, dtype=np.float64)
+        known = np.isfinite(hidden[issue_days, 0])
+        result[known, 0] = inner.head(torch.from_numpy(hidden[issue_days[known]])).squeeze(-1).numpy()
+        rows, starts = [], []
+        for row in np.flatnonzero(known):
+            for years in list(range(1, members + 1)) + list(range(-members, 0)):
+                first = issue_days[row] + 1 - 365 * years
+                if first < 0 or first + HORIZON_DAYS > usable_before:
+                    continue
+                if present[first:first + HORIZON_DAYS].sum() >= HORIZON_DAYS - 2:
+                    rows.append(row)
+                    starts.append(first)
+        rows, starts = np.asarray(rows, dtype=np.int64), np.asarray(starts, dtype=np.int64)
+        total = np.zeros((len(issue_days), HORIZON_DAYS))
+        count = np.zeros(len(issue_days))
+        offsets = np.arange(HORIZON_DAYS)
+        for chunk in range(0, len(rows), batch_size):
+            pick, first = rows[chunk:chunk + batch_size], starts[chunk:chunk + batch_size]
+            weather = torch.from_numpy(drivers[first[:, None] + offsets[None, :]])
+            inputs = torch.cat([weather, code.expand(len(pick), HORIZON_DAYS, -1)], dim=-1)
+            state = torch.from_numpy(hidden[issue_days[pick]]).unsqueeze(0).contiguous()
+            output, _ = inner.rnn(inputs, state)
+            np.add.at(total, pick, np.exp(inner.head(output).squeeze(-1).numpy().astype(np.float64)))
+            np.add.at(count, pick, 1.0)
+    filled = count > 0
+    result[filled, 1:] = np.log(total[filled] / count[filled, None])
+    return result
+
+
+def unknown_weather_features(changes: np.ndarray, scale: float) -> np.ndarray:
+    """
+    Turns :func:`unknown_weather_changes` into the ``sim_dlog`` and ``sim_add`` features.
+
+    :param changes: Array of shape (issue days, 1 + 14) of simulated log flow.
+    :type changes: np.ndarray
+    :param scale: The basin's flow scale in mm per hour.
+    :type scale: float
+    :return: Array of shape (issue days, 2 * bands): ``sim_dlog`` per band, then ``sim_add``.
+    :rtype: np.ndarray
+    """
+    level, ahead = np.exp(changes[:, 0]), np.exp(changes[:, 1:])
+    relative, additive = [], []
+    for first, last in tabular.BANDS.values():
+        mean = ahead[:, first - 1:last].mean(axis=1)
+        relative.append(np.clip(np.log(mean) - changes[:, 0], -MAX_LOG_RATIO, MAX_LOG_RATIO))
+        additive.append((mean - level) / (24.0 * scale))
+    return np.stack(relative + additive, axis=1).astype(np.float32)
+
+
+def simulate_unknown_weather(arms_dir: str, run: str, which: str = "own", seed: int = 0,
+                             members: int = MEMBER_YEARS) -> str:
+    """
+    Writes ``simesp_<label>.pkl``: simulation features that do not use the horizon's weather.
+
+    For every row of the cohort's forecast table: the change features from
+    :func:`unknown_weather_changes` and the simulation's current error (which never used the
+    horizon). The tree forecaster reads them as the feature group ``simesp:<label>``.
+
+    :param arms_dir: Cohort directory.
+    :type arms_dir: str
+    :param run: Pretraining run name.
+    :type run: str
+    :param which: Whose code each basin is simulated with (see :func:`basin_codes`).
+    :type which: str, optional
+    :param seed: Seed of shuffled codes, defaults to 0.
+    :type seed: int, optional
+    :param members: Other years tried on each side, defaults to ``MEMBER_YEARS``.
+    :type members: int, optional
+    :return: The label, ``<run>`` or ``<run>@<which>``.
+    :rtype: str
+    """
+    cache = _daily_cache(arms_dir)
+    data = pd.read_pickle(os.path.join(arms_dir, "tabular.pkl"))[["site_id", "date", "q0"]]
+    stored = pd.read_pickle(os.path.join(arms_dir, "sim_%s.pkl" % (
+        run if which == "own" else "%s@%s" % (run, which))))["sim"]
+    reader, decoder, report = load_run(arms_dir, run)
+    codes = basin_codes(arms_dir, reader, report, which, seed)
+    block = np.full((len(data), len(FEATURES)), np.nan, dtype=np.float32)
+    column = {name: position for position, name in enumerate(FEATURES)}
+    bands = list(tabular.BANDS)
+    dates, q0 = pd.to_datetime(data["date"]).to_numpy(), data["q0"].to_numpy(np.float64)
+    started = time.time()
+    for site, rows in data.groupby("site_id", sort=False).indices.items():
+        if site not in cache["daily"] or site not in codes.index:
+            continue
+        daily = cache["daily"][site]
+        issue = ((dates[rows] - daily.index[0].to_datetime64()) // np.timedelta64(1, "D")).astype(np.int64)
+        cutoff = int(np.searchsorted(daily.index.to_numpy(), np.datetime64(tabular.CUTOFF)))
+        code = torch.tensor(codes.loc[site].to_numpy(dtype=np.float32))
+        changes = unknown_weather_changes(decoder, daily, code, issue, cutoff, members)
+        values = unknown_weather_features(changes, cache["scale"][site])
+        for position, band in enumerate(bands):
+            block[rows, column[f"sim_dlog_{band}"]] = values[:, position]
+            block[rows, column[f"sim_add_{band}"]] = values[:, len(bands) + position]
+            block[rows, column[f"sim_dq_{band}"]] = q0[rows] * np.expm1(values[:, position].astype(np.float64))
+        error = basin_features(stored[site], daily.q_mm, cache["scale"][site]).reindex(dates[rows])
+        block[rows, column["sim_err0"]] = error["sim_err0"].to_numpy()
+        block[rows, column["sim_err7"]] = error["sim_err7"].to_numpy()
+    label = run if which == "own" else "%s@%s" % (run, which)
+    pd.to_pickle({"features": block, "run": run, "codes": which, "members": members,
+                  "rows": len(data)}, os.path.join(arms_dir, "simesp_%s.pkl" % label))
+    print("simulated %d rows without horizon weather with %s in %.0f s"
+          % (int(np.isfinite(block[:, 0]).sum()), label, time.time() - started), flush=True)
+    return label
+
+
+def unknown_weather_block(data: pd.DataFrame, arms_dir: str, label: str) -> np.ndarray:
+    """
+    Loads the ``simesp:<label>`` feature group for the cohort's forecast table.
+
+    :param data: The forecast table the features were written for.
+    :type data: pd.DataFrame
+    :param arms_dir: Cohort directory holding ``simesp_<label>.pkl``.
+    :type arms_dir: str
+    :param label: A label written by :func:`simulate_unknown_weather`.
+    :type label: str
+    :return: Array of shape (rows, len(FEATURES)).
+    :rtype: np.ndarray
+    """
+    stored = pd.read_pickle(os.path.join(arms_dir, "simesp_%s.pkl" % label))
+    if stored["rows"] != len(data):
+        raise ValueError("simesp_%s.pkl was written for a table of %d rows, not %d"
+                         % (label, stored["rows"], len(data)))
+    return stored["features"]
 
 
 def load_run(arms_dir: str, run: str):
@@ -592,6 +765,9 @@ def main() -> None:
     simulator.add_argument("--seed", type=int, default=0, help="seed of the shuffled codes")
     simulator.add_argument("--out-of-sample", default=None,
                            help="name pattern with {fold} of the runs that left each fold out")
+    simulator.add_argument("--unknown-weather", action="store_true",
+                           help="also write simesp_<label>.pkl: features that do not use the "
+                                "horizon's weather (other years' weather stands in)")
     args = parser.parse_args()
     if args.command == "daily":
         build_daily(args.arms_dir, args.workers)
@@ -600,6 +776,8 @@ def main() -> None:
         for run in args.run:
             for which in args.codes:
                 simulate(args.arms_dir, run, which, args.seed, daily, args.out_of_sample)
+                if args.unknown_weather:
+                    simulate_unknown_weather(args.arms_dir, run, which, args.seed)
 
 
 if __name__ == "__main__":
