@@ -35,6 +35,7 @@ import torch
 from torch.utils.data import Dataset
 
 from experiments.catchment_foundation import decoder_simulation as simulation
+from experiments.catchment_foundation import model_benchmark
 from experiments.catchment_foundation import pretrain_behaviour_code as behaviour
 from experiments.catchment_foundation import tabular_forecast_baseline as tabular
 
@@ -206,10 +207,11 @@ def predict(reader: torch.nn.Module, decoder: torch.nn.Module, windows: Forecast
 
 def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int = 0,
           epochs: int = 30, samples_per_epoch: int = 60000, batch_size: int = 256,
-          lr: float = 1e-3, weight_decay: float = 1e-4, code_dim: int = 32, dim: int = 64,
+          lr: Optional[float] = None, weight_decay: float = 1e-4, code_dim: int = 32, dim: int = 64,
           hidden: int = 64, dropout: float = 0.1, history_days: int = 180,
           horizon_weather: bool = True, validation_fraction: float = 0.15,
-          validation_windows: int = 12000, device: str = "cpu", verbose: bool = True) -> Dict:
+          validation_windows: int = 12000, model: str = "decoder", device: str = "cpu",
+          verbose: bool = True) -> Dict:
     """
     Fits one forecaster on the tree forecaster's fitting rows and forecasts its scoring rows.
 
@@ -228,7 +230,8 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     :type samples_per_epoch: int, optional
     :param batch_size: Windows per step, defaults to 256.
     :type batch_size: int, optional
-    :param lr: AdamW learning rate, defaults to 1e-3.
+    :param lr: AdamW learning rate; None takes 1e-3 for the decoder and the rate listed in
+        ``model_benchmark.MODELS`` for another model. Defaults to None.
     :type lr: float, optional
     :param weight_decay: AdamW weight decay, defaults to 1e-4.
     :type weight_decay: float, optional
@@ -250,6 +253,11 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     :type validation_fraction: float, optional
     :param validation_windows: Windows of those basins scored each epoch, defaults to 12000.
     :type validation_windows: int, optional
+    :param model: ``decoder`` (the GRU of this module) or the name of a Flow Forecast model in
+        ``model_benchmark.MODELS``, which is then trained and scored in its place. Such a model
+        gets the basin code, if the run has a description, as extra input channels. Defaults
+        to ``decoder``.
+    :type model: str, optional
     :param device: Torch device, defaults to "cpu".
     :type device: str, optional
     :param verbose: Print one line per epoch, defaults to True.
@@ -279,7 +287,14 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
                           seed=seed, **options)
     validation = ForecastWindows(cache["daily"], cache["scale"], validation_rows, described, **options)
     reader, decoder = build_models(described.shape[1], code_dim, dim, hidden, dropout)
-    trained = behaviour.CodeBlind(decoder) if not description else decoder
+    if model == "decoder":
+        trained = behaviour.CodeBlind(decoder) if not description else decoder
+        lr = 1e-3 if lr is None else lr
+    else:
+        decoder = trained = model_benchmark.build(
+            model, history_days + HORIZON, HORIZON, N_DRIVERS, code_dim if description else 0, hidden)
+        lr = model_benchmark.learning_rate(model) if lr is None else lr
+    parameters = sum(parameter.numel() for parameter in trained.parameters())
     started = time.time()
     history = pretrain_behaviour(reader, trained, fit, epochs=epochs, batch_size=batch_size, lr=lr,
                                  weight_decay=weight_decay, device=device,
@@ -297,7 +312,8 @@ def train(arms_dir: str, name: str, description: Sequence[str] = (), seed: int =
     pd.to_pickle(stored, os.path.join(arms_dir, "forecast_%s.pkl" % name))
     torch.save({"reader": reader.state_dict(), "decoder": decoder.state_dict()},
                os.path.join(arms_dir, "forecaster_%s.pt" % name))
-    report = {"name": name, "description": list(description), "seed": seed, "epochs": epochs,
+    report = {"name": name, "model": model, "parameters": int(parameters),
+              "description": list(description), "seed": seed, "epochs": epochs,
               "samples_per_epoch": samples_per_epoch, "batch_size": batch_size, "lr": lr,
               "weight_decay": weight_decay, "code_dim": code_dim, "dim": dim, "hidden": hidden,
               "dropout": dropout, "history_days": history_days, "horizon_weather": horizon_weather,
@@ -388,8 +404,11 @@ def main() -> None:
     trainer.add_argument("--epochs", type=int, default=30)
     trainer.add_argument("--samples-per-epoch", type=int, default=60000)
     trainer.add_argument("--batch-size", type=int, default=256)
-    trainer.add_argument("--lr", type=float, default=1e-3)
+    trainer.add_argument("--lr", type=float, default=None,
+                         help="default: 1e-3 for the decoder, the model's listed rate otherwise")
     trainer.add_argument("--weight-decay", type=float, default=1e-4)
+    trainer.add_argument("--model", default="decoder",
+                         help="decoder, or a Flow Forecast model: %s" % ", ".join(model_benchmark.MODELS))
     trainer.add_argument("--code-dim", type=int, default=32)
     trainer.add_argument("--dim", type=int, default=64)
     trainer.add_argument("--hidden", type=int, default=64)
